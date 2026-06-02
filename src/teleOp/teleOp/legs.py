@@ -6,24 +6,22 @@ from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 57600
-PORT = '/dev/ttyUSB0'
+PORT = '/dev/ttyUSB1'
 MOTOR_IDS = [0, 1, 2, 3]
 
 ADDR_TORQUE_ENABLE = 64
-ADDR_GOAL_VELOCITY = 104
+ADDR_GOAL_POSITION = 116
 TORQUE_ENABLE = 1
 TORQUE_DISABLE = 0
 
-# Keyboard sends -50 to 50; scale to Dynamixel velocity units (-200 to 200)
-VELOCITY_SCALE = 4
-
-# Motors 0 and 3 are mounted in reverse relative to the chassis
-REVERSED_MOTORS = {0, 3}
+# Leg angle range: 0-180 degrees → Dynamixel position 0-4095
+# (full 360° = 4095 ticks, so 180° = 2048 ticks)
+TICKS_PER_DEGREE = 4095.0 / 360.0
 
 
-class WheelController(Node):
+class LegController(Node):
     def __init__(self):
-        super().__init__('wheel_controller')
+        super().__init__('leg_controller')
 
         self.port = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
@@ -53,61 +51,57 @@ class WheelController(Node):
                 self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
             if result != COMM_SUCCESS or error != 0:
                 self.get_logger().error(
-                    f'Torque enable failed for motor {mid}: '
+                    f'Torque enable failed for leg motor {mid}: '
                     f'{self.packet.getTxRxResult(result)} | '
                     f'{self.packet.getRxPacketError(error)}')
                 return False
 
-        self.get_logger().info(f'Wheel motors ready on {PORT}')
+        self.get_logger().info(f'Leg motors ready on {PORT}')
         return True
 
-    def _set_velocity(self, motor_id, velocity):
-        if motor_id in REVERSED_MOTORS:
-            velocity = -velocity
-        # Dynamixel expects unsigned 32-bit two's complement for negative values
-        raw = int(velocity) & 0xFFFFFFFF
+    def _set_position(self, motor_id, angle_deg):
+        angle_deg = max(0, min(int(angle_deg), 180))
+        position = int(angle_deg * TICKS_PER_DEGREE)
         result, _ = self.packet.write4ByteTxRx(
-            self.port, motor_id, ADDR_GOAL_VELOCITY, raw)
+            self.port, motor_id, ADDR_GOAL_POSITION, position)
         if result != COMM_SUCCESS:
-            self.get_logger().warn(f'Velocity write failed for motor {motor_id}')
+            self.get_logger().warn(f'Position write failed for leg motor {motor_id}')
 
     def _estop_callback(self, msg):
         if not msg.data:
             return
-        self.get_logger().warn('EMERGENCY STOP: zeroing and disabling wheel motors')
+        self.get_logger().warn('EMERGENCY STOP: disabling leg motors')
         if self._ready:
             for mid in MOTOR_IDS:
-                self._set_velocity(mid, 0)
                 self.packet.write1ByteTxRx(
                     self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
             self._ready = False
 
     def listener_callback(self, msg):
-        if len(msg.data) < 4:
-            self.get_logger().warn(f'Expected at least 4 values, got {len(msg.data)}')
+        if len(msg.data) < 8:
+            self.get_logger().warn(f'Expected 8 values, got {len(msg.data)}')
             return
 
-        wheel_speeds = list(msg.data[0:4])
+        leg_angles = list(msg.data[4:8])
 
         if self._ready:
-            for i, speed in enumerate(wheel_speeds):
-                self._set_velocity(MOTOR_IDS[i], speed * VELOCITY_SCALE)
-        self.get_logger().debug(f'Wheels: {wheel_speeds}')
+            for i, angle in enumerate(leg_angles):
+                self._set_position(MOTOR_IDS[i], angle)
+        self.get_logger().debug(f'Legs: {leg_angles}')
 
     def destroy_node(self):
         if self._ready:
             for mid in MOTOR_IDS:
-                self._set_velocity(mid, 0)
                 self.packet.write1ByteTxRx(
                     self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
             self.port.closePort()
-            self.get_logger().info('Wheel motors disabled')
+            self.get_logger().info('Leg motors disabled')
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = WheelController()
+    node = LegController()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

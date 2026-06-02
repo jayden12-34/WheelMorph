@@ -24,8 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'wheels = teleOp.wheels:main',
             'keyboard = teleOp.keyboard:main',
+            'wheels = teleOp.wheels:main',
+            'legs = teleOp.legs:main',
         ],
     },
 )
