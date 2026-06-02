@@ -46,7 +46,7 @@ class WheelController(Node):
             Bool, 'estop', self._estop_callback, 10)
 
     def _initialize(self):
-        if not _SDK_AVAILABLE:
+        if not _git AVAILABLE:
             self.get_logger().warn(
                 'dynamixel_sdk not installed — wheel node running in SIMULATION mode')
             return False

@@ -234,13 +234,15 @@ class GuiTeleop(Node):
         wf.grid(row=0, column=0, sticky="nsew")
         tk.Label(wf, text="WHEEL", bg=C_PANEL, fg=C_CYAN,
                  font=("Courier New", 8, "bold")).pack()
-        ws = Scale(wf, from_=50, to=-50, orient=VERTICAL, length=280, width=20,
+        ws_border = tk.Frame(wf, bg=C_CYAN_DIM)
+        ws_border.pack(fill=tk.BOTH, expand=True, pady=2)
+        ws = Scale(ws_border, from_=50, to=-50, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_GREEN, highlightthickness=0, bd=0,
                    font=("Courier New", 7),
                    command=lambda v, i=wid: self.update_wheel(i, v))
         ws.set(0)
-        ws.pack(fill=tk.BOTH, expand=True)
+        ws.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         wl = tk.Label(wf, text="0", bg=C_PANEL, fg=C_GREEN,
                       font=("Courier New", 11, "bold"))
         wl.pack()
@@ -252,13 +254,15 @@ class GuiTeleop(Node):
         lf_frame.grid(row=0, column=1, sticky="nsew")
         tk.Label(lf_frame, text="LEG °", bg=C_PANEL, fg=C_CYAN,
                  font=("Courier New", 8, "bold")).pack()
-        ls = Scale(lf_frame, from_=180, to=0, orient=VERTICAL, length=280, width=20,
+        ls_border = tk.Frame(lf_frame, bg=C_PURPLE_DIM)
+        ls_border.pack(fill=tk.BOTH, expand=True, pady=2)
+        ls = Scale(ls_border, from_=180, to=0, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_PURPLE, highlightthickness=0, bd=0,
                    font=("Courier New", 7),
                    command=lambda v, i=lid: self.update_leg(i, v))
         ls.set(0)
-        ls.pack(fill=tk.BOTH, expand=True)
+        ls.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         ll = tk.Label(lf_frame, text="0°", bg=C_PANEL, fg=C_PURPLE,
                       font=("Courier New", 11, "bold"))
         ll.pack()
@@ -270,10 +274,6 @@ class GuiTeleop(Node):
     # -----------------------------------------------------------------------
     # Diagram rendering
     # -----------------------------------------------------------------------
-
-    # Outward diagonal angles (screen coords: y-down, 0°=east, CW)
-    # Each corner's "outward" direction from the robot centre
-    _LEG_BASE = {0: 135, 1: 225, 2: 315, 3: 45}
 
     def draw_robot_diagram(self):
         c = self.canvas
@@ -323,12 +323,13 @@ class GuiTeleop(Node):
 
         # ---- Draw legs (behind body) ----
         for i in range(4):
-            ax, ay  = leg_attach[i]
-            deg     = self._LEG_BASE[i] + (angles[i] - 90)
-            rad     = math.radians(deg)
-            length  = 50
-            ex      = ax + length * math.cos(rad)
-            ey      = ay + length * math.sin(rad)
+            ax, ay = leg_attach[i]
+            length = 50
+            # Vertical rotation: 0°=pointing down, 90°=horizontal outward, 180°=pointing up
+            rad = math.radians(angles[i])
+            horiz_dir = -1 if ax < cx else 1
+            ex = int(ax + horiz_dir * math.sin(rad) * length)
+            ey = int(ay + math.cos(rad) * length)
 
             # Glow (wide dim)
             c.create_line(ax, ay, ex, ey, fill=C_PURPLE_DIM, width=7,
@@ -372,18 +373,28 @@ class GuiTeleop(Node):
             # Wheel disc
             c.create_oval(wx-16, wy-16, wx+16, wy+16,
                           fill=C_PANEL, outline=col, width=2)
-            # Velocity arrow
-            if spd != 0:
-                alen = max(5, int(abs(spd) / 50.0 * 11))
-                vy   = -1 if spd > 0 else 1
-                c.create_line(wx, wy - vy*2, wx, wy + vy*alen,
-                              fill=col, width=2,
-                              arrow=tk.LAST, arrowshape=(5, 7, 3))
             # Labels
             c.create_text(wx, wy - 5, text=str(i), fill=col,
                           font=("Courier New", 8, "bold"))
             c.create_text(wx, wy + 6, text=str(spd), fill=C_WHITE,
                           font=("Courier New", 7))
+
+        # ---- Overall direction arrow ----
+        # Mecanum kinematics: 0=BL, 1=FL, 2=FR, 3=BR
+        forward = (speeds[0] + speeds[1] + speeds[2] + speeds[3]) / 4.0
+        lateral = (-speeds[0] + speeds[1] + speeds[2] - speeds[3]) / 4.0  # positive=left
+        mag = math.sqrt(forward**2 + lateral**2)
+        if mag > 0.5:
+            norm_scale = min(w, h) * 0.18 / max(self.wheel_max, 1)
+            adx = int(-lateral * norm_scale)   # left=negative x on screen
+            ady = int(-forward * norm_scale)   # forward=negative y on screen
+            if abs(forward) >= abs(lateral):
+                arrow_col = C_GREEN if forward > 0 else C_RED
+            else:
+                arrow_col = "#ffff44"
+            c.create_line(cx, cy, cx + adx, cy + ady,
+                          fill=arrow_col, width=4,
+                          arrow=tk.LAST, arrowshape=(14, 18, 6))
 
     # -----------------------------------------------------------------------
     # Slider callbacks (user interaction)
