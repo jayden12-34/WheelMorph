@@ -1,12 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
-
-try:
-    from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
-    _SDK_AVAILABLE = True
-except ImportError:
-    _SDK_AVAILABLE = False
+from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 57600
@@ -27,13 +22,8 @@ class LegController(Node):
         super().__init__('leg_controller')
 
         self._sim_counter = 0
-
-        if _SDK_AVAILABLE:
-            self.port   = PortHandler(PORT)
-            self.packet = PacketHandler(PROTOCOL_VERSION)
-        else:
-            self.port   = None
-            self.packet = None
+        self.port   = PortHandler(PORT)
+        self.packet = PacketHandler(PROTOCOL_VERSION)
 
         self._ready = self._initialize()
 
@@ -43,33 +33,33 @@ class LegController(Node):
             Bool, 'estop', self._estop_callback, 10)
 
     def _initialize(self):
-        if not _SDK_AVAILABLE:
-            self.get_logger().warn(
-                'dynamixel_sdk not installed — leg node running in SIMULATION mode')
-            return False
-
-        if not self.port.openPort():
-            self.get_logger().warn(
-                f'Cannot open {PORT} — leg node running in SIMULATION mode')
-            return False
-        if not self.port.setBaudRate(BAUDRATE):
-            self.get_logger().warn(
-                'Failed to set baudrate — leg node running in SIMULATION mode')
-            return False
-
-        for mid in MOTOR_IDS:
-            result, error = self.packet.write1ByteTxRx(
-                self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
-            if result != COMM_SUCCESS or error != 0:
+        try:
+            if not self.port.openPort():
                 self.get_logger().warn(
-                    f'Torque enable failed for leg motor {mid} '
-                    f'({self.packet.getTxRxResult(result)} | '
-                    f'{self.packet.getRxPacketError(error)}) '
-                    '— running in SIMULATION mode')
+                    f'Cannot open {PORT} — leg node running in SIMULATION mode')
+                return False
+            if not self.port.setBaudRate(BAUDRATE):
+                self.get_logger().warn(
+                    'Failed to set baudrate — leg node running in SIMULATION mode')
                 return False
 
-        self.get_logger().info(f'Leg motors ready on {PORT}')
-        return True
+            for mid in MOTOR_IDS:
+                result, error = self.packet.write1ByteTxRx(
+                    self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+                if result != COMM_SUCCESS or error != 0:
+                    self.get_logger().warn(
+                        f'Torque enable failed for leg motor {mid} '
+                        f'({self.packet.getTxRxResult(result)} | '
+                        f'{self.packet.getRxPacketError(error)}) '
+                        '— running in SIMULATION mode')
+                    return False
+
+            self.get_logger().info(f'Leg motors ready on {PORT}')
+            return True
+        except Exception as e:
+            self.get_logger().warn(
+                f'Motor connection error ({e}) — leg node running in SIMULATION mode')
+            return False
 
     def _set_position(self, motor_id, angle_deg):
         angle_deg = max(0, min(int(angle_deg), 180))

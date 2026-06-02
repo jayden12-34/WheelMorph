@@ -9,22 +9,22 @@ import time
 import math
 
 # ---------------------------------------------------------------------------
-# Sci-fi color palette
+# Iron Man HUD color palette
 # ---------------------------------------------------------------------------
-C_BG         = "#080c14"   # root background
-C_PANEL      = "#0d1428"   # widget panel background
-C_DARK       = "#050810"   # darkest elements / diagram bg
-C_CYAN       = "#00d4ff"   # primary neon accent
-C_CYAN_DIM   = "#003a4a"   # dimmed cyan (borders, grid)
-C_GREEN      = "#00ff7f"   # forward / positive speed
-C_GREEN_DIM  = "#003322"   # dim green glow
-C_RED        = "#ff1a3c"   # reverse / danger
-C_RED_DIM    = "#3a000f"   # dim red glow
-C_PURPLE     = "#9060ff"   # leg indicators
-C_PURPLE_DIM = "#1e0840"   # dim purple glow
-C_WHITE      = "#c8e8ff"   # primary text
-C_GRAY       = "#3a5070"   # muted / stopped state
-C_TROUGH     = "#0e1928"   # slider trough
+C_BG         = "#081428"   # dark navy (lighter)
+C_PANEL      = "#0e2040"   # panel - rich dark blue
+C_DARK       = "#040c1c"   # darkest elements / diagram bg
+C_CYAN       = "#28d4ff"   # primary accent - JARVIS blue
+C_CYAN_DIM   = "#1a5070"   # dim borders / grid
+C_GREEN      = "#00eeb0"   # forward / positive - teal-green
+C_GREEN_DIM  = "#00503e"   # dim green glow
+C_RED        = "#ff3a55"   # reverse / danger
+C_RED_DIM    = "#4a001a"   # dim red glow
+C_PURPLE     = "#6699ff"   # leg indicators - blue-purple
+C_PURPLE_DIM = "#183070"   # dim blue-purple glow
+C_WHITE      = "#d8f0ff"   # primary text - bright cool blue-white
+C_GRAY       = "#3878c0"   # muted / stopped state - bright medium blue
+C_TROUGH     = "#0c2848"   # slider trough - deep blue
 
 # Movement key → set_* method suffix
 _MOVE = {
@@ -72,6 +72,18 @@ class GuiTeleop(Node):
         self.leg_sliders   = {}
         self.leg_labels    = {}
 
+        # Diagram item caches — avoid full redraw every frame
+        self._diagram_size  = (0, 0)
+        self._last_diag_spd = None
+        self._diag_glow  = {}
+        self._diag_disc  = {}
+        self._diag_dot   = {}
+        self._diag_idx   = {}
+        self._diag_spd   = {}
+
+        # Slider dirty-check
+        self._last_ui_spd = None
+
         self._build_gui()
 
     # -----------------------------------------------------------------------
@@ -96,70 +108,70 @@ class GuiTeleop(Node):
         self._periodic_update()
 
     def _build_header(self):
-        hdr = tk.Frame(self.root, bg="#020509", pady=7)
+        hdr = tk.Frame(self.root, bg="#081428", pady=7)
         hdr.pack(fill=tk.X)
 
         # Heartbeat blink dot
         self.hb_canvas = tk.Canvas(hdr, width=10, height=10,
-                                   bg="#020509", highlightthickness=0)
+                                   bg="#081428", highlightthickness=0)
         self.hb_dot = self.hb_canvas.create_oval(1, 1, 9, 9, fill=C_CYAN_DIM)
         self.hb_canvas.pack(side=tk.LEFT, padx=(14, 0))
 
         tk.Label(hdr, text="WHEEL TELEOP CONTROL INTERFACE",
                  font=("Courier New", 14, "bold"),
-                 fg=C_CYAN, bg="#020509").pack(side=tk.LEFT, padx=8)
+                 fg=C_CYAN, bg="#081428").pack(side=tk.LEFT, padx=8)
 
         # Status indicator
         self.status_dot_c = tk.Canvas(hdr, width=12, height=12,
-                                      bg="#020509", highlightthickness=0)
+                                      bg="#081428", highlightthickness=0)
         self.status_dot   = self.status_dot_c.create_oval(1, 1, 11, 11, fill="#333")
         self.status_dot_c.pack(side=tk.RIGHT, padx=6)
         self.status_lbl = tk.Label(hdr, text="● NO LINK",
-                                   fg="#555", bg="#020509",
+                                   fg="#555", bg="#081428",
                                    font=("Courier New", 9, "bold"))
         self.status_lbl.pack(side=tk.RIGHT, padx=4)
 
     def _build_control_bar(self):
-        bar = tk.Frame(self.root, bg="#090e1c", pady=8)
+        bar = tk.Frame(self.root, bg=C_PANEL, pady=8)
         bar.pack(fill=tk.X)
 
         # D-pad buttons
-        pad = tk.Frame(bar, bg="#090e1c")
+        pad = tk.Frame(bar, bg=C_PANEL)
         pad.pack(side=tk.LEFT, padx=14)
 
         _btn = dict(font=("Courier New", 9, "bold"), relief=tk.FLAT,
                     bd=0, width=7, height=2, cursor="hand2")
         tk.Button(pad, text="▲  FWD\n(W / ↑)",
-                  bg="#0a2010", fg=C_GREEN,
-                  activebackground="#163a20", activeforeground=C_GREEN,
+                  bg="#073a22", fg=C_GREEN,
+                  activebackground="#0a5030", activeforeground=C_GREEN,
                   command=self.set_forward, **_btn).grid(row=0, column=1, padx=2, pady=1)
         tk.Button(pad, text="◄ LEFT\n(A / ←)",
-                  bg="#252510", fg="#ffff44",
-                  activebackground="#3a3a18", activeforeground="#ffff44",
+                  bg="#0a2848", fg="#60c4ff",
+                  activebackground="#0e3a60", activeforeground="#80d8ff",
                   command=self.set_left, **_btn).grid(row=1, column=0, padx=2, pady=1)
         tk.Button(pad, text="▼  REV\n(S / ↓)",
-                  bg="#200a10", fg=C_RED,
-                  activebackground="#381420", activeforeground=C_RED,
+                  bg="#2e0c1e", fg=C_RED,
+                  activebackground="#401228", activeforeground=C_RED,
                   command=self.set_reverse, **_btn).grid(row=1, column=1, padx=2, pady=1)
         tk.Button(pad, text="RIGHT ►\n(D / →)",
-                  bg="#252510", fg="#ffff44",
-                  activebackground="#3a3a18", activeforeground="#ffff44",
+                  bg="#0a2848", fg="#60c4ff",
+                  activebackground="#0e3a60", activeforeground="#80d8ff",
                   command=self.set_right, **_btn).grid(row=1, column=2, padx=2, pady=1)
         tk.Button(pad, text="■  STOP  [ SPACE ]",
-                  bg="#151515", fg=C_WHITE,
-                  activebackground="#222", activeforeground=C_WHITE,
+                  bg="#0c1a30", fg=C_WHITE,
+                  activebackground="#101e3a", activeforeground=C_WHITE,
                   command=self.set_stop,
                   font=("Courier New", 9, "bold"), relief=tk.FLAT, bd=0,
                   width=22, height=1).grid(row=2, column=0, columnspan=3, padx=2, pady=2)
 
         # Speed slider
-        spf = tk.Frame(bar, bg="#090e1c")
+        spf = tk.Frame(bar, bg=C_PANEL)
         spf.pack(side=tk.LEFT, padx=18)
-        tk.Label(spf, text="SPEED %", bg="#090e1c", fg=C_CYAN,
+        tk.Label(spf, text="SPEED %", bg=C_PANEL, fg=C_CYAN,
                  font=("Courier New", 9, "bold")).pack()
         self.speed_scale = Scale(
             spf, from_=0, to=100, orient=HORIZONTAL, length=130, width=16,
-            bg="#090e1c", fg=C_WHITE, troughcolor=C_TROUGH,
+            bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
             activebackground=C_CYAN, highlightthickness=0, bd=0,
             font=("Courier New", 8),
             command=lambda v: setattr(self, 'speed_pct', int(float(v))),
@@ -168,21 +180,21 @@ class GuiTeleop(Node):
         self.speed_scale.pack()
 
         # Checkboxes
-        opt = tk.Frame(bar, bg="#090e1c")
+        opt = tk.Frame(bar, bg=C_PANEL)
         opt.pack(side=tk.LEFT, padx=18)
         self.dead_man_var = tk.BooleanVar(value=True)
         tk.Checkbutton(opt, text="DEAD MAN  (key-release stops)",
                        variable=self.dead_man_var,
-                       bg="#090e1c", fg=C_CYAN, selectcolor=C_DARK,
-                       activebackground="#090e1c", activeforeground=C_CYAN,
+                       bg=C_PANEL, fg=C_CYAN, selectcolor=C_DARK,
+                       activebackground=C_PANEL, activeforeground=C_CYAN,
                        font=("Courier New", 9),
                        command=lambda: setattr(self, 'dead_man',
                                                self.dead_man_var.get())).pack(anchor="w")
         self.compact_var = tk.BooleanVar(value=False)
         tk.Checkbutton(opt, text="COMPACT MODE",
                        variable=self.compact_var,
-                       bg="#090e1c", fg=C_CYAN, selectcolor=C_DARK,
-                       activebackground="#090e1c", activeforeground=C_CYAN,
+                       bg=C_PANEL, fg=C_CYAN, selectcolor=C_DARK,
+                       activebackground=C_PANEL, activeforeground=C_CYAN,
                        font=("Courier New", 9),
                        command=self._toggle_compact).pack(anchor="w")
 
@@ -235,14 +247,14 @@ class GuiTeleop(Node):
         tk.Label(wf, text="WHEEL", bg=C_PANEL, fg=C_CYAN,
                  font=("Courier New", 8, "bold")).pack()
         ws_border = tk.Frame(wf, bg=C_CYAN_DIM)
-        ws_border.pack(fill=tk.BOTH, expand=True, pady=2)
+        ws_border.pack(expand=True, fill=tk.Y, pady=2)
         ws = Scale(ws_border, from_=50, to=-50, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_GREEN, highlightthickness=0, bd=0,
                    font=("Courier New", 7),
                    command=lambda v, i=wid: self.update_wheel(i, v))
         ws.set(0)
-        ws.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        ws.pack(fill=tk.Y, expand=True, padx=2, pady=2)
         wl = tk.Label(wf, text="0", bg=C_PANEL, fg=C_GREEN,
                       font=("Courier New", 11, "bold"))
         wl.pack()
@@ -254,15 +266,15 @@ class GuiTeleop(Node):
         lf_frame.grid(row=0, column=1, sticky="nsew")
         tk.Label(lf_frame, text="LEG °", bg=C_PANEL, fg=C_CYAN,
                  font=("Courier New", 8, "bold")).pack()
-        ls_border = tk.Frame(lf_frame, bg=C_PURPLE_DIM)
-        ls_border.pack(fill=tk.BOTH, expand=True, pady=2)
+        ls_border = tk.Frame(lf_frame, bg=C_CYAN_DIM)
+        ls_border.pack(expand=True, fill=tk.Y, pady=2)
         ls = Scale(ls_border, from_=180, to=0, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_PURPLE, highlightthickness=0, bd=0,
                    font=("Courier New", 7),
                    command=lambda v, i=lid: self.update_leg(i, v))
         ls.set(0)
-        ls.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        ls.pack(fill=tk.Y, expand=True, padx=2, pady=2)
         ll = tk.Label(lf_frame, text="0°", bg=C_PANEL, fg=C_PURPLE,
                       font=("Courier New", 11, "bold"))
         ll.pack()
@@ -275,126 +287,96 @@ class GuiTeleop(Node):
     # Diagram rendering
     # -----------------------------------------------------------------------
 
+    def _rebuild_diagram(self, w, h):
+        """Full canvas rebuild — called only on first draw or window resize."""
+        c = self.canvas
+        c.delete("all")
+        cx, cy = w // 2, h // 2
+
+        # Background grid
+        for x in range(0, w, 40):
+            c.create_line(x, 0, x, h, fill="#0e2438", width=1)
+        for y in range(0, h, 40):
+            c.create_line(0, y, w, y, fill="#0e2438", width=1)
+
+        # HUD corner brackets
+        for bx, by, sx, sy in ((8,8,1,1),(w-8,8,-1,1),(8,h-8,1,-1),(w-8,h-8,-1,-1)):
+            c.create_line(bx, by, bx+sx*20, by, fill=C_CYAN, width=2)
+            c.create_line(bx, by, bx, by+sy*20, fill=C_CYAN, width=2)
+
+        # Forward label
+        c.create_text(cx, 14, text="▲  FORWARD", fill=C_CYAN_DIM,
+                      font=("Courier New", 8))
+
+        bw, bh = 50, 70
+
+        # Robot body (static)
+        c.create_rectangle(cx-bw-3, cy-bh-3, cx+bw+3, cy+bh+3,
+                            outline=C_CYAN_DIM, fill="", width=1)
+        c.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
+                            fill="#071a2e", outline=C_CYAN, width=2)
+        c.create_line(cx, cy-bh, cx, cy+bh, fill=C_CYAN_DIM, width=1)
+        c.create_line(cx-bw, cy, cx+bw, cy, fill=C_CYAN_DIM, width=1)
+        c.create_text(cx, cy - 8, text="ROBOT", fill=C_CYAN,
+                      font=("Courier New", 9, "bold"))
+        c.create_text(cx, cy + 8, text="◊", fill=C_CYAN_DIM,
+                      font=("Courier New", 8))
+
+        # Wheel positions
+        wheel_pos = {
+            0: (cx - 90, cy + 85),
+            1: (cx - 90, cy - 85),
+            2: (cx + 90, cy - 85),
+            3: (cx + 90, cy + 85),
+        }
+
+        # Pre-create mutable wheel items
+        for i, (wx, wy) in wheel_pos.items():
+            self._diag_glow[i] = c.create_oval(
+                wx-22, wy-22, wx+22, wy+22, outline=C_GRAY, fill="", width=5)
+            self._diag_disc[i] = c.create_oval(
+                wx-14, wy-14, wx+14, wy+14, fill=C_DARK, outline=C_GRAY, width=2)
+            self._diag_dot[i]  = c.create_oval(
+                wx-3, wy-3, wx+3, wy+3, fill=C_GRAY, outline="")
+            self._diag_idx[i]  = c.create_text(
+                wx, wy-22, text=str(i), fill=C_GRAY,
+                font=("Courier New", 8, "bold"))
+            self._diag_spd[i]  = c.create_text(
+                wx, wy+22, text="0", fill=C_WHITE,
+                font=("Courier New", 7))
+
+        self._last_diag_spd = None   # force color update on next pass
+
     def draw_robot_diagram(self):
         c = self.canvas
         w, h = c.winfo_width(), c.winfo_height()
         if w < 20 or h < 20:
             return
 
-        c.delete("all")
-        cx, cy = w // 2, h // 2
-
-        # Background grid
-        for x in range(0, w, 40):
-            c.create_line(x, 0, x, h, fill="#0c1420", width=1)
-        for y in range(0, h, 40):
-            c.create_line(0, y, w, y, fill="#0c1420", width=1)
-
-        # HUD corner brackets
-        for bx, by, sx, sy in ((8,8,1,1),(w-8,8,-1,1),(8,h-8,1,-1),(w-8,h-8,-1,-1)):
-            c.create_line(bx, by, bx+sx*20, by, fill=C_CYAN_DIM, width=2)
-            c.create_line(bx, by, bx, by+sy*20, fill=C_CYAN_DIM, width=2)
-
-        # Forward label
-        c.create_text(cx, 14, text="▲  FORWARD", fill=C_CYAN_DIM,
-                      font=("Courier New", 8))
+        if (w, h) != self._diagram_size:
+            self._diagram_size = (w, h)
+            self._rebuild_diagram(w, h)
 
         with self.lock:
             speeds = list(self.wheel_speed)
-            angles = list(self.leg_angles)
 
-        bw, bh = 50, 70   # robot body half-extents
+        if speeds == self._last_diag_spd:
+            return
+        self._last_diag_spd = speeds[:]
 
-        # Wheel positions
-        wheel_pos = {
-            0: (cx - 90, cy + 85),   # BL
-            1: (cx - 90, cy - 85),   # FL
-            2: (cx + 90, cy - 85),   # FR
-            3: (cx + 90, cy + 85),   # BR
-        }
-
-        # Leg attachment corners on the robot body rectangle
-        leg_attach = {
-            0: (cx - bw, cy + bh),
-            1: (cx - bw, cy - bh),
-            2: (cx + bw, cy - bh),
-            3: (cx + bw, cy + bh),
-        }
-
-        # ---- Draw legs (behind body) ----
         for i in range(4):
-            ax, ay = leg_attach[i]
-            length = 50
-            # Vertical rotation: 0°=pointing down, 90°=horizontal outward, 180°=pointing up
-            rad = math.radians(angles[i])
-            horiz_dir = -1 if ax < cx else 1
-            ex = int(ax + horiz_dir * math.sin(rad) * length)
-            ey = int(ay + math.cos(rad) * length)
-
-            # Glow (wide dim)
-            c.create_line(ax, ay, ex, ey, fill=C_PURPLE_DIM, width=7,
-                          capstyle=tk.ROUND)
-            # Core (thin bright)
-            c.create_line(ax, ay, ex, ey, fill=C_PURPLE, width=2,
-                          capstyle=tk.ROUND)
-            # End-effector dot
-            c.create_oval(ex-4, ey-4, ex+4, ey+4, fill=C_PURPLE, outline="")
-            # Angle readout
-            anchor = "w" if ex >= ax else "e"
-            ox = 7 if ex >= ax else -7
-            c.create_text(ex + ox, ey, text=f"{angles[i]}°",
-                          fill="#604a80", font=("Courier New", 7), anchor=anchor)
-
-        # ---- Robot body (drawn over legs) ----
-        # Outer glow rect
-        c.create_rectangle(cx-bw-3, cy-bh-3, cx+bw+3, cy+bh+3,
-                            outline=C_CYAN_DIM, fill="", width=1)
-        # Body
-        c.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
-                            fill="#0a1830", outline=C_CYAN, width=2)
-        c.create_text(cx, cy - 8, text="ROBOT", fill=C_CYAN,
-                      font=("Courier New", 9, "bold"))
-        c.create_text(cx, cy + 8, text="◊", fill=C_CYAN_DIM,
-                      font=("Courier New", 8))
-
-        # ---- Wheels ----
-        for i, (wx, wy) in wheel_pos.items():
             spd = speeds[i]
             if spd > 0:
-                col, dim = C_GREEN,  C_GREEN_DIM
+                col, dim = C_GREEN, C_GREEN_DIM
             elif spd < 0:
-                col, dim = C_RED,    C_RED_DIM
+                col, dim = C_RED, C_RED_DIM
             else:
-                col, dim = C_GRAY,   "#10181e"
-
-            # Outer glow ring
-            c.create_oval(wx-24, wy-24, wx+24, wy+24,
-                          outline=dim, fill="", width=5)
-            # Wheel disc
-            c.create_oval(wx-16, wy-16, wx+16, wy+16,
-                          fill=C_PANEL, outline=col, width=2)
-            # Labels
-            c.create_text(wx, wy - 5, text=str(i), fill=col,
-                          font=("Courier New", 8, "bold"))
-            c.create_text(wx, wy + 6, text=str(spd), fill=C_WHITE,
-                          font=("Courier New", 7))
-
-        # ---- Overall direction arrow ----
-        # Mecanum kinematics: 0=BL, 1=FL, 2=FR, 3=BR
-        forward = (speeds[0] + speeds[1] + speeds[2] + speeds[3]) / 4.0
-        lateral = (-speeds[0] + speeds[1] + speeds[2] - speeds[3]) / 4.0  # positive=left
-        mag = math.sqrt(forward**2 + lateral**2)
-        if mag > 0.5:
-            norm_scale = min(w, h) * 0.18 / max(self.wheel_max, 1)
-            adx = int(-lateral * norm_scale)   # left=negative x on screen
-            ady = int(-forward * norm_scale)   # forward=negative y on screen
-            if abs(forward) >= abs(lateral):
-                arrow_col = C_GREEN if forward > 0 else C_RED
-            else:
-                arrow_col = "#ffff44"
-            c.create_line(cx, cy, cx + adx, cy + ady,
-                          fill=arrow_col, width=4,
-                          arrow=tk.LAST, arrowshape=(14, 18, 6))
+                col, dim = C_GRAY, "#12283e"
+            c.itemconfig(self._diag_glow[i], outline=dim)
+            c.itemconfig(self._diag_disc[i], outline=col)
+            c.itemconfig(self._diag_dot[i],  fill=col)
+            c.itemconfig(self._diag_idx[i],  fill=col)
+            c.itemconfig(self._diag_spd[i],  text=str(spd))
 
     # -----------------------------------------------------------------------
     # Slider callbacks (user interaction)
@@ -424,12 +406,14 @@ class GuiTeleop(Node):
         with self.lock:
             speeds = list(self.wheel_speed)
 
-        self._syncing = True
-        for i in range(4):
-            self.wheel_sliders[i].set(speeds[i])
-            color = C_GREEN if speeds[i] > 0 else (C_RED if speeds[i] < 0 else C_GRAY)
-            self.wheel_labels[i].config(text=str(speeds[i]), fg=color)
-        self._syncing = False
+        if speeds != self._last_ui_spd:
+            self._last_ui_spd = speeds[:]
+            self._syncing = True
+            for i in range(4):
+                self.wheel_sliders[i].set(speeds[i])
+                color = C_GREEN if speeds[i] > 0 else (C_RED if speeds[i] < 0 else C_GRAY)
+                self.wheel_labels[i].config(text=str(speeds[i]), fg=color)
+            self._syncing = False
 
         self.draw_robot_diagram()
         self.root.after(50, self._periodic_update)
