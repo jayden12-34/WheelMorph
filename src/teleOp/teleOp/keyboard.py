@@ -3,282 +3,421 @@ from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
 
 import tkinter as tk
-from tkinter import ttk, Scale, VERTICAL, HORIZONTAL
+from tkinter import Scale, VERTICAL, HORIZONTAL
 import threading
 import time
+import math
 
+# ---------------------------------------------------------------------------
+# Sci-fi color palette
+# ---------------------------------------------------------------------------
+C_BG         = "#080c14"   # root background
+C_PANEL      = "#0d1428"   # widget panel background
+C_DARK       = "#050810"   # darkest elements / diagram bg
+C_CYAN       = "#00d4ff"   # primary neon accent
+C_CYAN_DIM   = "#003a4a"   # dimmed cyan (borders, grid)
+C_GREEN      = "#00ff7f"   # forward / positive speed
+C_GREEN_DIM  = "#003322"   # dim green glow
+C_RED        = "#ff1a3c"   # reverse / danger
+C_RED_DIM    = "#3a000f"   # dim red glow
+C_PURPLE     = "#9060ff"   # leg indicators
+C_PURPLE_DIM = "#1e0840"   # dim purple glow
+C_WHITE      = "#c8e8ff"   # primary text
+C_GRAY       = "#3a5070"   # muted / stopped state
+C_TROUGH     = "#0e1928"   # slider trough
 
-# Maps key names to the set_* method suffix
-_MOVE_MAP = {
-    'w': 'forward', 'up': 'forward',
-    'a': 'left',    'left': 'left',
-    's': 'reverse', 'down': 'reverse',
+# Movement key → set_* method suffix
+_MOVE = {
+    'w': 'forward', 'up':    'forward',
+    'a': 'left',    'left':  'left',
+    's': 'reverse', 'down':  'reverse',
     'd': 'right',   'right': 'right',
 }
+
+
+def _sci_frame(parent, title, **kw):
+    """LabelFrame with neon-cyan title and dark panel background."""
+    return tk.LabelFrame(
+        parent, text=f"  {title}  ",
+        bg=C_PANEL, fg=C_CYAN,
+        font=("Courier New", 9, "bold"),
+        bd=1, relief=tk.SOLID,
+        highlightbackground=C_CYAN_DIM,
+        highlightthickness=1,
+        **kw,
+    )
 
 
 class GuiTeleop(Node):
 
     def __init__(self):
         super().__init__('gui_teleop')
-        self.pub = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
+        self.pub       = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
         self.estop_pub = self.create_publisher(Bool, 'estop', 10)
 
         self.wheel_speed = [0, 0, 0, 0]
-        self.leg_angles = [0, 0, 0, 0]
-        self.lock = threading.Lock()
+        self.leg_angles  = [0, 0, 0, 0]
+        self.lock        = threading.Lock()
 
-        self.wheel_max = 50
-        self.speed_pct = 100
-        self.dead_man = True
+        self.wheel_max  = 50
+        self.speed_pct  = 100
+        self.dead_man   = True
+        self._syncing   = False
+        self._held_keys = []        # ordered list of currently-held movement keys
+        self._compact_panels = []   # corner panels hidden in compact mode
+        self._hb_state  = False     # heartbeat blink state
 
-        # Ordered list of currently-held movement keys (most recent last)
-        self._held_keys = []
-        # Suppress slider callbacks during programmatic updates
-        self._syncing = False
+        self.wheel_sliders = {}
+        self.wheel_labels  = {}
+        self.leg_sliders   = {}
+        self.leg_labels    = {}
 
         self._build_gui()
 
-    # ------------------------------------------------------------------ #
-    #  GUI construction                                                    #
-    # ------------------------------------------------------------------ #
+    # -----------------------------------------------------------------------
+    # GUI construction
+    # -----------------------------------------------------------------------
 
     def _build_gui(self):
         self.root = tk.Tk()
-        self.root.title("ROS2 Wheel & Leg Teleop")
-        self.root.geometry("1400x900")
+        self.root.title("WHEEL TELEOP  ◈  ROS2")
+        self.root.geometry("1440x920")
+        self.root.configure(bg=C_BG)
 
         self._build_header()
         self._build_control_bar()
         self._build_main_area()
 
-        self.root.bind('<KeyPress>', self.on_key_press)
+        self.root.bind('<KeyPress>',   self.on_key_press)
         self.root.bind('<KeyRelease>', self.on_key_release)
 
         self._poll_status()
+        self._blink_heartbeat()
         self._periodic_update()
 
     def _build_header(self):
-        header = tk.Frame(self.root, bg="#2b2b2b", pady=6)
-        header.pack(fill=tk.X)
+        hdr = tk.Frame(self.root, bg="#020509", pady=7)
+        hdr.pack(fill=tk.X)
 
-        tk.Label(header, text="ROS2 Wheel & Leg Teleop",
-                 font=("Arial", 14, "bold"), fg="white", bg="#2b2b2b").pack(side=tk.LEFT, padx=12)
+        # Heartbeat blink dot
+        self.hb_canvas = tk.Canvas(hdr, width=10, height=10,
+                                   bg="#020509", highlightthickness=0)
+        self.hb_dot = self.hb_canvas.create_oval(1, 1, 9, 9, fill=C_CYAN_DIM)
+        self.hb_canvas.pack(side=tk.LEFT, padx=(14, 0))
 
-        self.status_canvas = tk.Canvas(header, width=16, height=16,
-                                       bg="#2b2b2b", highlightthickness=0)
-        self.status_dot = self.status_canvas.create_oval(2, 2, 14, 14, fill="gray")
-        self.status_canvas.pack(side=tk.RIGHT, padx=5)
+        tk.Label(hdr, text="WHEEL TELEOP CONTROL INTERFACE",
+                 font=("Courier New", 14, "bold"),
+                 fg=C_CYAN, bg="#020509").pack(side=tk.LEFT, padx=8)
 
-        self.status_label = tk.Label(header, text="No subscribers",
-                                     fg="gray", bg="#2b2b2b", font=("Arial", 10))
-        self.status_label.pack(side=tk.RIGHT, padx=4)
+        # Status indicator
+        self.status_dot_c = tk.Canvas(hdr, width=12, height=12,
+                                      bg="#020509", highlightthickness=0)
+        self.status_dot   = self.status_dot_c.create_oval(1, 1, 11, 11, fill="#333")
+        self.status_dot_c.pack(side=tk.RIGHT, padx=6)
+        self.status_lbl = tk.Label(hdr, text="● NO LINK",
+                                   fg="#555", bg="#020509",
+                                   font=("Courier New", 9, "bold"))
+        self.status_lbl.pack(side=tk.RIGHT, padx=4)
 
     def _build_control_bar(self):
-        bar = tk.Frame(self.root, bg="lightgray", pady=10)
+        bar = tk.Frame(self.root, bg="#090e1c", pady=8)
         bar.pack(fill=tk.X)
 
-        # WASD d-pad
-        bf = tk.Frame(bar, bg="lightgray")
-        bf.pack(side=tk.LEFT, padx=12)
+        # D-pad buttons
+        pad = tk.Frame(bar, bg="#090e1c")
+        pad.pack(side=tk.LEFT, padx=14)
 
-        tk.Label(bf, text="W/A/S/D or Arrow Keys",
-                 font=("Arial", 10), bg="lightgray").grid(row=0, column=0, columnspan=3, pady=2)
+        _btn = dict(font=("Courier New", 9, "bold"), relief=tk.FLAT,
+                    bd=0, width=7, height=2, cursor="hand2")
+        tk.Button(pad, text="▲  FWD\n(W / ↑)",
+                  bg="#0a2010", fg=C_GREEN,
+                  activebackground="#163a20", activeforeground=C_GREEN,
+                  command=self.set_forward, **_btn).grid(row=0, column=1, padx=2, pady=1)
+        tk.Button(pad, text="◄ LEFT\n(A / ←)",
+                  bg="#252510", fg="#ffff44",
+                  activebackground="#3a3a18", activeforeground="#ffff44",
+                  command=self.set_left, **_btn).grid(row=1, column=0, padx=2, pady=1)
+        tk.Button(pad, text="▼  REV\n(S / ↓)",
+                  bg="#200a10", fg=C_RED,
+                  activebackground="#381420", activeforeground=C_RED,
+                  command=self.set_reverse, **_btn).grid(row=1, column=1, padx=2, pady=1)
+        tk.Button(pad, text="RIGHT ►\n(D / →)",
+                  bg="#252510", fg="#ffff44",
+                  activebackground="#3a3a18", activeforeground="#ffff44",
+                  command=self.set_right, **_btn).grid(row=1, column=2, padx=2, pady=1)
+        tk.Button(pad, text="■  STOP  [ SPACE ]",
+                  bg="#151515", fg=C_WHITE,
+                  activebackground="#222", activeforeground=C_WHITE,
+                  command=self.set_stop,
+                  font=("Courier New", 9, "bold"), relief=tk.FLAT, bd=0,
+                  width=22, height=1).grid(row=2, column=0, columnspan=3, padx=2, pady=2)
 
-        tk.Button(bf, text="FWD\n(W/↑)", width=8, height=2, bg="lightgreen",
-                  command=self.set_forward).grid(row=1, column=1, padx=2, pady=2)
-        tk.Button(bf, text="LEFT\n(A/←)", width=8, height=2, bg="lightyellow",
-                  command=self.set_left).grid(row=2, column=0, padx=2, pady=2)
-        tk.Button(bf, text="REV\n(S/↓)", width=8, height=2, bg="lightcoral",
-                  command=self.set_reverse).grid(row=2, column=1, padx=2, pady=2)
-        tk.Button(bf, text="RIGHT\n(D/→)", width=8, height=2, bg="lightyellow",
-                  command=self.set_right).grid(row=2, column=2, padx=2, pady=2)
-        tk.Button(bf, text="STOP (SPACE)", width=26, height=1, bg="gray", fg="white",
-                  command=self.set_stop).grid(row=3, column=0, columnspan=3, padx=2, pady=2)
-
-        # Speed %
-        sf = tk.Frame(bar, bg="lightgray")
-        sf.pack(side=tk.LEFT, padx=16)
-        tk.Label(sf, text="Speed %", bg="lightgray", font=("Arial", 10, "bold")).pack()
-        self.speed_scale = Scale(sf, from_=0, to=100, orient=HORIZONTAL,
-                                 length=140, width=20, font=("Arial", 10),
-                                 command=lambda v: setattr(self, 'speed_pct', int(float(v))))
+        # Speed slider
+        spf = tk.Frame(bar, bg="#090e1c")
+        spf.pack(side=tk.LEFT, padx=18)
+        tk.Label(spf, text="SPEED %", bg="#090e1c", fg=C_CYAN,
+                 font=("Courier New", 9, "bold")).pack()
+        self.speed_scale = Scale(
+            spf, from_=0, to=100, orient=HORIZONTAL, length=130, width=16,
+            bg="#090e1c", fg=C_WHITE, troughcolor=C_TROUGH,
+            activebackground=C_CYAN, highlightthickness=0, bd=0,
+            font=("Courier New", 8),
+            command=lambda v: setattr(self, 'speed_pct', int(float(v))),
+        )
         self.speed_scale.set(100)
         self.speed_scale.pack()
 
         # Checkboxes
-        of = tk.Frame(bar, bg="lightgray")
-        of.pack(side=tk.LEFT, padx=16)
-
+        opt = tk.Frame(bar, bg="#090e1c")
+        opt.pack(side=tk.LEFT, padx=18)
         self.dead_man_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(of, text="Dead man\n(key-release stops)",
-                       variable=self.dead_man_var, bg="lightgray", font=("Arial", 10),
-                       command=lambda: setattr(self, 'dead_man', self.dead_man_var.get())
-                       ).pack(anchor="w")
-
+        tk.Checkbutton(opt, text="DEAD MAN  (key-release stops)",
+                       variable=self.dead_man_var,
+                       bg="#090e1c", fg=C_CYAN, selectcolor=C_DARK,
+                       activebackground="#090e1c", activeforeground=C_CYAN,
+                       font=("Courier New", 9),
+                       command=lambda: setattr(self, 'dead_man',
+                                               self.dead_man_var.get())).pack(anchor="w")
         self.compact_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(of, text="Compact mode", variable=self.compact_var,
-                       bg="lightgray", font=("Arial", 10),
+        tk.Checkbutton(opt, text="COMPACT MODE",
+                       variable=self.compact_var,
+                       bg="#090e1c", fg=C_CYAN, selectcolor=C_DARK,
+                       activebackground="#090e1c", activeforeground=C_CYAN,
+                       font=("Courier New", 9),
                        command=self._toggle_compact).pack(anchor="w")
 
-        # E-STOP (right-aligned, prominent)
-        tk.Button(bar, text="⚠  EMERGENCY\n       STOP",
-                  font=("Arial", 15, "bold"), bg="red", fg="white",
-                  activebackground="#bb0000", activeforeground="white",
-                  width=13, height=3, relief=tk.RAISED, bd=4,
+        # E-STOP
+        tk.Button(bar, text="⚠\nE-STOP",
+                  font=("Courier New", 16, "bold"),
+                  bg="#2a0010", fg="#ff0040",
+                  activebackground="#ff0040", activeforeground="#ffffff",
+                  relief=tk.RAISED, bd=3, width=8, height=3,
+                  cursor="hand2",
                   command=self.emergency_stop).pack(side=tk.RIGHT, padx=20)
 
     def _build_main_area(self):
-        main = tk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True)
+        main = tk.Frame(self.root, bg=C_BG)
+        main.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # --- Diagram (left, fixed-ish width, scales in height) ---
-        diag_frame = tk.LabelFrame(main, text="Robot Diagram", font=("Arial", 11, "bold"))
-        diag_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5, pady=5)
+        # 3-column layout: corner panels | diagram | corner panels
+        main.grid_columnconfigure(0, weight=0, minsize=280)
+        main.grid_columnconfigure(1, weight=1)
+        main.grid_columnconfigure(2, weight=0, minsize=280)
+        main.grid_rowconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
 
-        self.canvas = tk.Canvas(diag_frame, width=320, bg="white")
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        # Draw only after the canvas has been sized by the geometry manager
+        for wid, lid, row, col, title in (
+            (1, 1, 0, 0, "FL — FRONT LEFT"),
+            (0, 0, 1, 0, "BL — BACK LEFT"),
+            (2, 2, 0, 2, "FR — FRONT RIGHT"),
+            (3, 3, 1, 2, "BR — BACK RIGHT"),
+        ):
+            p = self._build_corner_panel(main, wid, lid, row, col, title)
+            self._compact_panels.append(p)
+
+        # Diagram — spans both rows in center column
+        diag = _sci_frame(main, "ROBOT DIAGRAM")
+        diag.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=4, pady=4)
+        self.canvas = tk.Canvas(diag, bg=C_DARK, highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         self.canvas.bind('<Configure>', lambda _e: self.draw_robot_diagram())
 
-        # --- Tabbed sliders (right, fills remaining space) ---
-        self.slider_frame = tk.Frame(main)
-        self.slider_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+    def _build_corner_panel(self, parent, wid, lid, row, col, title):
+        outer = _sci_frame(parent, title)
+        outer.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(1, weight=1)
+        outer.grid_rowconfigure(0, weight=1)
 
-        nb = ttk.Notebook(self.slider_frame)
-        nb.pack(fill=tk.BOTH, expand=True)
+        # Wheel slider (left half)
+        wf = tk.Frame(outer, bg=C_PANEL, padx=5, pady=4)
+        wf.grid(row=0, column=0, sticky="nsew")
+        tk.Label(wf, text="WHEEL", bg=C_PANEL, fg=C_CYAN,
+                 font=("Courier New", 8, "bold")).pack()
+        ws = Scale(wf, from_=50, to=-50, orient=VERTICAL, length=280, width=20,
+                   bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
+                   activebackground=C_GREEN, highlightthickness=0, bd=0,
+                   font=("Courier New", 7),
+                   command=lambda v, i=wid: self.update_wheel(i, v))
+        ws.set(0)
+        ws.pack(fill=tk.BOTH, expand=True)
+        wl = tk.Label(wf, text="0", bg=C_PANEL, fg=C_GREEN,
+                      font=("Courier New", 11, "bold"))
+        wl.pack()
+        self.wheel_sliders[wid] = ws
+        self.wheel_labels[wid]  = wl
 
-        self.wheel_sliders = {}
-        self.wheel_labels = {}
-        self.leg_sliders = {}
-        self.leg_labels = {}
+        # Leg slider (right half)
+        lf_frame = tk.Frame(outer, bg=C_PANEL, padx=5, pady=4)
+        lf_frame.grid(row=0, column=1, sticky="nsew")
+        tk.Label(lf_frame, text="LEG °", bg=C_PANEL, fg=C_CYAN,
+                 font=("Courier New", 8, "bold")).pack()
+        ls = Scale(lf_frame, from_=180, to=0, orient=VERTICAL, length=280, width=20,
+                   bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
+                   activebackground=C_PURPLE, highlightthickness=0, bd=0,
+                   font=("Courier New", 7),
+                   command=lambda v, i=lid: self.update_leg(i, v))
+        ls.set(0)
+        ls.pack(fill=tk.BOTH, expand=True)
+        ll = tk.Label(lf_frame, text="0°", bg=C_PANEL, fg=C_PURPLE,
+                      font=("Courier New", 11, "bold"))
+        ll.pack()
+        self.leg_sliders[lid] = ls
+        self.leg_labels[lid]  = ll
 
-        # Wheels tab
-        wt = tk.Frame(nb)
-        nb.add(wt, text="  Wheels  ")
-        wt.grid_columnconfigure(0, weight=1)
-        wt.grid_columnconfigure(1, weight=1)
-        wt.grid_rowconfigure(0, weight=1)
-        wt.grid_rowconfigure(1, weight=1)
+        return outer
 
-        for wid, row, col, title in (
-            (1, 0, 0, "Front Left (1)"),
-            (2, 0, 1, "Front Right (2)"),
-            (0, 1, 0, "Back Left (0)"),
-            (3, 1, 1, "Back Right (3)"),
-        ):
-            pf = tk.LabelFrame(wt, text=title, font=("Arial", 11, "bold"))
-            pf.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
-            inner = tk.Frame(pf, padx=8, pady=4)
-            inner.pack(fill=tk.BOTH, expand=True)
-            tk.Label(inner, text=f"Wheel {wid}", font=("Arial", 12, "bold")).pack()
-            ws = Scale(inner, from_=50, to=-50, orient=VERTICAL, length=300, width=28,
-                       font=("Arial", 10),
-                       command=lambda v, i=wid: self.update_wheel(i, v))
-            ws.set(0)
-            ws.pack(fill=tk.BOTH, expand=True)
-            wl = tk.Label(inner, text="0", font=("Arial", 11))
-            wl.pack()
-            self.wheel_sliders[wid] = ws
-            self.wheel_labels[wid] = wl
+    # -----------------------------------------------------------------------
+    # Diagram rendering
+    # -----------------------------------------------------------------------
 
-        # Legs tab
-        lt = tk.Frame(nb)
-        nb.add(lt, text="  Legs  ")
-        lt.grid_columnconfigure(0, weight=1)
-        lt.grid_columnconfigure(1, weight=1)
-        lt.grid_rowconfigure(0, weight=1)
-        lt.grid_rowconfigure(1, weight=1)
-
-        for lid, row, col, title in (
-            (1, 0, 0, "Front Left (1)"),
-            (2, 0, 1, "Front Right (2)"),
-            (0, 1, 0, "Back Left (0)"),
-            (3, 1, 1, "Back Right (3)"),
-        ):
-            pf = tk.LabelFrame(lt, text=title, font=("Arial", 11, "bold"))
-            pf.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
-            inner = tk.Frame(pf, padx=8, pady=4)
-            inner.pack(fill=tk.BOTH, expand=True)
-            tk.Label(inner, text=f"Leg {lid}", font=("Arial", 12, "bold")).pack()
-            ls = Scale(inner, from_=180, to=0, orient=VERTICAL, length=300, width=28,
-                       font=("Arial", 10),
-                       command=lambda v, i=lid: self.update_leg(i, v))
-            ls.set(0)
-            ls.pack(fill=tk.BOTH, expand=True)
-            ll = tk.Label(inner, text="0", font=("Arial", 11))
-            ll.pack()
-            self.leg_sliders[lid] = ls
-            self.leg_labels[lid] = ll
-
-    # ------------------------------------------------------------------ #
-    #  Diagram                                                             #
-    # ------------------------------------------------------------------ #
+    # Outward diagonal angles (screen coords: y-down, 0°=east, CW)
+    # Each corner's "outward" direction from the robot centre
+    _LEG_BASE = {0: 135, 1: 225, 2: 315, 3: 45}
 
     def draw_robot_diagram(self):
         c = self.canvas
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 10 or h < 10:
-            return  # not yet laid out — Configure will call us again
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 20 or h < 20:
+            return
 
         c.delete("all")
         cx, cy = w // 2, h // 2
 
-        c.create_rectangle(cx - 40, cy - 55, cx + 40, cy + 55,
-                            fill="lightblue", outline="black", width=2)
-        c.create_text(cx, cy, text="ROBOT", font=("Arial", 10, "bold"))
+        # Background grid
+        for x in range(0, w, 40):
+            c.create_line(x, 0, x, h, fill="#0c1420", width=1)
+        for y in range(0, h, 40):
+            c.create_line(0, y, w, y, fill="#0c1420", width=1)
 
-        wheel_pos = {
-            0: (cx - 80, cy + 75),
-            1: (cx - 80, cy - 75),
-            2: (cx + 80, cy - 75),
-            3: (cx + 80, cy + 75),
-        }
+        # HUD corner brackets
+        for bx, by, sx, sy in ((8,8,1,1),(w-8,8,-1,1),(8,h-8,1,-1),(w-8,h-8,-1,-1)):
+            c.create_line(bx, by, bx+sx*20, by, fill=C_CYAN_DIM, width=2)
+            c.create_line(bx, by, bx, by+sy*20, fill=C_CYAN_DIM, width=2)
+
+        # Forward label
+        c.create_text(cx, 14, text="▲  FORWARD", fill=C_CYAN_DIM,
+                      font=("Courier New", 8))
+
         with self.lock:
             speeds = list(self.wheel_speed)
+            angles = list(self.leg_angles)
 
-        for i, (x, y) in wheel_pos.items():
-            speed = speeds[i]
-            if speed > 0:
-                color = "#90ee90"
-            elif speed < 0:
-                color = "#f08080"
+        bw, bh = 50, 70   # robot body half-extents
+
+        # Wheel positions
+        wheel_pos = {
+            0: (cx - 90, cy + 85),   # BL
+            1: (cx - 90, cy - 85),   # FL
+            2: (cx + 90, cy - 85),   # FR
+            3: (cx + 90, cy + 85),   # BR
+        }
+
+        # Leg attachment corners on the robot body rectangle
+        leg_attach = {
+            0: (cx - bw, cy + bh),
+            1: (cx - bw, cy - bh),
+            2: (cx + bw, cy - bh),
+            3: (cx + bw, cy + bh),
+        }
+
+        # ---- Draw legs (behind body) ----
+        for i in range(4):
+            ax, ay  = leg_attach[i]
+            deg     = self._LEG_BASE[i] + (angles[i] - 90)
+            rad     = math.radians(deg)
+            length  = 50
+            ex      = ax + length * math.cos(rad)
+            ey      = ay + length * math.sin(rad)
+
+            # Glow (wide dim)
+            c.create_line(ax, ay, ex, ey, fill=C_PURPLE_DIM, width=7,
+                          capstyle=tk.ROUND)
+            # Core (thin bright)
+            c.create_line(ax, ay, ex, ey, fill=C_PURPLE, width=2,
+                          capstyle=tk.ROUND)
+            # End-effector dot
+            c.create_oval(ex-4, ey-4, ex+4, ey+4, fill=C_PURPLE, outline="")
+            # Angle readout
+            anchor = "w" if ex >= ax else "e"
+            ox = 7 if ex >= ax else -7
+            c.create_text(ex + ox, ey, text=f"{angles[i]}°",
+                          fill="#604a80", font=("Courier New", 7), anchor=anchor)
+
+        # ---- Robot body (drawn over legs) ----
+        # Outer glow rect
+        c.create_rectangle(cx-bw-3, cy-bh-3, cx+bw+3, cy+bh+3,
+                            outline=C_CYAN_DIM, fill="", width=1)
+        # Body
+        c.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
+                            fill="#0a1830", outline=C_CYAN, width=2)
+        c.create_text(cx, cy - 8, text="ROBOT", fill=C_CYAN,
+                      font=("Courier New", 9, "bold"))
+        c.create_text(cx, cy + 8, text="◊", fill=C_CYAN_DIM,
+                      font=("Courier New", 8))
+
+        # ---- Wheels ----
+        for i, (wx, wy) in wheel_pos.items():
+            spd = speeds[i]
+            if spd > 0:
+                col, dim = C_GREEN,  C_GREEN_DIM
+            elif spd < 0:
+                col, dim = C_RED,    C_RED_DIM
             else:
-                color = "#cccccc"
-            c.create_oval(x - 20, y - 20, x + 20, y + 20,
-                          fill=color, outline="black", width=2)
-            c.create_text(x, y - 7, text=str(i), font=("Arial", 10, "bold"))
-            c.create_text(x, y + 7, text=str(speed), font=("Arial", 9))
+                col, dim = C_GRAY,   "#10181e"
 
-    # ------------------------------------------------------------------ #
-    #  State updates                                                       #
-    # ------------------------------------------------------------------ #
+            # Outer glow ring
+            c.create_oval(wx-24, wy-24, wx+24, wy+24,
+                          outline=dim, fill="", width=5)
+            # Wheel disc
+            c.create_oval(wx-16, wy-16, wx+16, wy+16,
+                          fill=C_PANEL, outline=col, width=2)
+            # Velocity arrow
+            if spd != 0:
+                alen = max(5, int(abs(spd) / 50.0 * 11))
+                vy   = -1 if spd > 0 else 1
+                c.create_line(wx, wy - vy*2, wx, wy + vy*alen,
+                              fill=col, width=2,
+                              arrow=tk.LAST, arrowshape=(5, 7, 3))
+            # Labels
+            c.create_text(wx, wy - 5, text=str(i), fill=col,
+                          font=("Courier New", 8, "bold"))
+            c.create_text(wx, wy + 6, text=str(spd), fill=C_WHITE,
+                          font=("Courier New", 7))
+
+    # -----------------------------------------------------------------------
+    # Slider callbacks (user interaction)
+    # -----------------------------------------------------------------------
 
     def update_wheel(self, i, v):
         if self._syncing:
             return
+        val = int(float(v))
         with self.lock:
-            self.wheel_speed[i] = int(float(v))
-        self.wheel_labels[i].config(text=str(int(float(v))))
+            self.wheel_speed[i] = val
+        color = C_GREEN if val > 0 else (C_RED if val < 0 else C_GRAY)
+        self.wheel_labels[i].config(text=str(val), fg=color)
 
     def update_leg(self, i, v):
+        val = int(float(v))
         with self.lock:
-            self.leg_angles[i] = int(float(v))
-        self.leg_labels[i].config(text=str(int(float(v))))
+            self.leg_angles[i] = val
+        self.leg_labels[i].config(text=f"{val}°")
 
-    # ------------------------------------------------------------------ #
-    #  Periodic UI sync (decoupled from key-repeat rate)                  #
-    # ------------------------------------------------------------------ #
+    # -----------------------------------------------------------------------
+    # Periodic loops
+    # -----------------------------------------------------------------------
 
     def _periodic_update(self):
+        """Sync wheel sliders + diagram at 20 Hz, decoupled from key-repeat."""
         with self.lock:
             speeds = list(self.wheel_speed)
 
         self._syncing = True
         for i in range(4):
             self.wheel_sliders[i].set(speeds[i])
-            self.wheel_labels[i].config(text=str(speeds[i]))
+            color = C_GREEN if speeds[i] > 0 else (C_RED if speeds[i] < 0 else C_GRAY)
+            self.wheel_labels[i].config(text=str(speeds[i]), fg=color)
         self._syncing = False
 
         self.draw_robot_diagram()
@@ -287,36 +426,42 @@ class GuiTeleop(Node):
     def _poll_status(self):
         count = self.pub.get_subscription_count()
         if count > 0:
-            self.status_canvas.itemconfig(self.status_dot, fill="limegreen")
-            self.status_label.config(text=f"{count} subscriber(s)", fg="limegreen")
+            self.status_dot_c.itemconfig(self.status_dot, fill="#00ff44")
+            self.status_lbl.config(text=f"● LINKED  [{count}]", fg="#00ff44")
         else:
-            self.status_canvas.itemconfig(self.status_dot, fill="red")
-            self.status_label.config(text="No subscribers", fg="red")
+            self.status_dot_c.itemconfig(self.status_dot, fill=C_RED)
+            self.status_lbl.config(text="● NO LINK", fg=C_RED)
         self.root.after(1000, self._poll_status)
 
-    # ------------------------------------------------------------------ #
-    #  Movement commands (update state only; UI sync happens at 20 Hz)    #
-    # ------------------------------------------------------------------ #
+    def _blink_heartbeat(self):
+        self._hb_state = not self._hb_state
+        self.hb_canvas.itemconfig(self.hb_dot,
+                                  fill=C_CYAN if self._hb_state else C_CYAN_DIM)
+        self.root.after(600, self._blink_heartbeat)
+
+    # -----------------------------------------------------------------------
+    # Movement commands (update state only — UI sync happens in _periodic_update)
+    # -----------------------------------------------------------------------
 
     def set_forward(self):
-        speed = int(self.wheel_max * self.speed_pct / 100)
+        spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [speed] * 4
+            self.wheel_speed = [spd] * 4
 
     def set_reverse(self):
-        speed = int(self.wheel_max * self.speed_pct / 100)
+        spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [-speed] * 4
+            self.wheel_speed = [-spd] * 4
 
     def set_left(self):
-        speed = int(self.wheel_max * self.speed_pct / 100)
+        spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [-speed, speed, speed, -speed]
+            self.wheel_speed = [-spd, spd, spd, -spd]
 
     def set_right(self):
-        speed = int(self.wheel_max * self.speed_pct / 100)
+        spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [speed, -speed, -speed, speed]
+            self.wheel_speed = [spd, -spd, -spd, spd]
 
     def set_stop(self):
         with self.lock:
@@ -325,10 +470,9 @@ class GuiTeleop(Node):
     def emergency_stop(self):
         with self.lock:
             self.wheel_speed = [0] * 4
-            self.leg_angles = [0] * 4
+            self.leg_angles  = [0] * 4
         self._held_keys.clear()
 
-        # Immediately publish zeros so motors react before next publish_loop tick
         zero = Int32MultiArray()
         zero.data = [0] * 8
         self.pub.publish(zero)
@@ -337,23 +481,22 @@ class GuiTeleop(Node):
         estop.data = True
         self.estop_pub.publish(estop)
 
-        # Reset leg sliders in UI
         self._syncing = True
         for i in range(4):
             self.leg_sliders[i].set(0)
-            self.leg_labels[i].config(text="0")
+            self.leg_labels[i].config(text="0°")
         self._syncing = False
 
-    # ------------------------------------------------------------------ #
-    #  Key handling with held-key tracking                                 #
-    # ------------------------------------------------------------------ #
+    # -----------------------------------------------------------------------
+    # Key handling with held-key tracking
+    # -----------------------------------------------------------------------
 
     def on_key_press(self, e):
         k = e.keysym.lower()
-        if k in _MOVE_MAP:
+        if k in _MOVE:
             if k not in self._held_keys:
                 self._held_keys.append(k)
-            getattr(self, f'set_{_MOVE_MAP[k]}')()
+            getattr(self, f'set_{_MOVE[k]}')()
         elif k == 'space':
             self._held_keys.clear()
             self.set_stop()
@@ -369,24 +512,25 @@ class GuiTeleop(Node):
         if not self._held_keys:
             self.set_stop()
         else:
-            # Re-apply whichever movement key is still held (most recently pressed)
-            getattr(self, f'set_{_MOVE_MAP[self._held_keys[-1]]}')()
+            getattr(self, f'set_{_MOVE[self._held_keys[-1]]}')()
 
-    # ------------------------------------------------------------------ #
-    #  Options                                                             #
-    # ------------------------------------------------------------------ #
+    # -----------------------------------------------------------------------
+    # Options
+    # -----------------------------------------------------------------------
 
     def _toggle_compact(self):
         if self.compact_var.get():
-            self.slider_frame.pack_forget()
-            self.root.geometry("500x720")
+            for p in self._compact_panels:
+                p.grid_remove()
+            self.root.geometry("600x760")
         else:
-            self.slider_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-            self.root.geometry("1400x900")
+            for p in self._compact_panels:
+                p.grid()
+            self.root.geometry("1440x920")
 
-    # ------------------------------------------------------------------ #
-    #  ROS publish loop (background thread)                               #
-    # ------------------------------------------------------------------ #
+    # -----------------------------------------------------------------------
+    # ROS publish loop (background thread)
+    # -----------------------------------------------------------------------
 
     def publish_loop(self):
         dt = 1.0 / 20
