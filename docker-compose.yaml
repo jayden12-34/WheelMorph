@@ -1,0 +1,28 @@
+services:
+  ros2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jetson-ros2-humble:latest
+    container_name: jetson-ros2-humble
+    restart: "no"
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=/tmp/.docker-xauth
+      - LOCAL_UID=${LOCAL_UID:-1000}
+      - LOCAL_GID=${LOCAL_GID:-1000}
+    network_mode: "host"
+    ipc: host
+    devices: []
+    volumes:
+      - ./:/workspace:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker-xauth:/tmp/.docker-xauth:rw
+    working_dir: /workspace
+    user: "root"
+    shm_size: "1gb"
+    cap_add:
+      - SYS_PTRACE
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "-c", "sleep infinity"]
