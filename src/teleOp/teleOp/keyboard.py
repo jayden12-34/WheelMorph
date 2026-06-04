@@ -11,20 +11,20 @@ import math
 # ---------------------------------------------------------------------------
 # Iron Man HUD color palette
 # ---------------------------------------------------------------------------
-C_BG         = "#081428"   # dark navy (lighter)
-C_PANEL      = "#0e2040"   # panel - rich dark blue
-C_DARK       = "#040c1c"   # darkest elements / diagram bg
-C_CYAN       = "#28d4ff"   # primary accent - JARVIS blue
-C_CYAN_DIM   = "#1a5070"   # dim borders / grid
-C_GREEN      = "#00eeb0"   # forward / positive - teal-green
-C_GREEN_DIM  = "#00503e"   # dim green glow
-C_RED        = "#ff3a55"   # reverse / danger
-C_RED_DIM    = "#4a001a"   # dim red glow
-C_PURPLE     = "#6699ff"   # leg indicators - blue-purple
-C_PURPLE_DIM = "#183070"   # dim blue-purple glow
-C_WHITE      = "#d8f0ff"   # primary text - bright cool blue-white
-C_GRAY       = "#3878c0"   # muted / stopped state - bright medium blue
-C_TROUGH     = "#0c2848"   # slider trough - deep blue
+C_BG         = "#0a1a35"   # navy background
+C_PANEL      = "#122448"   # vivid dark blue panel
+C_DARK       = "#060e20"   # darkest elements / diagram bg
+C_CYAN       = "#40dcff"   # bright JARVIS blue
+C_CYAN_DIM   = "#205878"   # visible blue border
+C_GREEN      = "#00f5bc"   # forward / positive - vivid teal-green
+C_GREEN_DIM  = "#005a48"   # dim green glow
+C_RED        = "#ff4060"   # reverse / danger - vivid red
+C_RED_DIM    = "#550020"   # dim red glow
+C_PURPLE     = "#7aabff"   # leg indicators - bright blue-purple
+C_PURPLE_DIM = "#1e3888"   # dim blue-purple glow
+C_WHITE      = "#e8f8ff"   # primary text - near-white blue-tinted
+C_GRAY       = "#4888d0"   # muted / stopped state - vivid medium blue
+C_TROUGH     = "#102e55"   # slider trough - visible deep blue
 
 # Movement key → set_* method suffix
 _MOVE = {
@@ -108,26 +108,26 @@ class GuiTeleop(Node):
         self._periodic_update()
 
     def _build_header(self):
-        hdr = tk.Frame(self.root, bg="#081428", pady=7)
+        hdr = tk.Frame(self.root, bg="#0a1a35", pady=7)
         hdr.pack(fill=tk.X)
 
         # Heartbeat blink dot
         self.hb_canvas = tk.Canvas(hdr, width=10, height=10,
-                                   bg="#081428", highlightthickness=0)
+                                   bg="#0a1a35", highlightthickness=0)
         self.hb_dot = self.hb_canvas.create_oval(1, 1, 9, 9, fill=C_CYAN_DIM)
         self.hb_canvas.pack(side=tk.LEFT, padx=(14, 0))
 
         tk.Label(hdr, text="WHEEL TELEOP CONTROL INTERFACE",
                  font=("Courier New", 14, "bold"),
-                 fg=C_CYAN, bg="#081428").pack(side=tk.LEFT, padx=8)
+                 fg=C_CYAN, bg="#0a1a35").pack(side=tk.LEFT, padx=8)
 
         # Status indicator
         self.status_dot_c = tk.Canvas(hdr, width=12, height=12,
-                                      bg="#081428", highlightthickness=0)
+                                      bg="#0a1a35", highlightthickness=0)
         self.status_dot   = self.status_dot_c.create_oval(1, 1, 11, 11, fill="#333")
         self.status_dot_c.pack(side=tk.RIGHT, padx=6)
         self.status_lbl = tk.Label(hdr, text="● NO LINK",
-                                   fg="#555", bg="#081428",
+                                   fg="#555", bg="#0a1a35",
                                    font=("Courier New", 9, "bold"))
         self.status_lbl.pack(side=tk.RIGHT, padx=4)
 
@@ -251,7 +251,7 @@ class GuiTeleop(Node):
         ws = Scale(ws_border, from_=50, to=-50, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_GREEN, highlightthickness=0, bd=0,
-                   font=("Courier New", 7),
+                   showvalue=0,
                    command=lambda v, i=wid: self.update_wheel(i, v))
         ws.set(0)
         ws.pack(fill=tk.Y, expand=True, padx=2, pady=2)
@@ -271,7 +271,7 @@ class GuiTeleop(Node):
         ls = Scale(ls_border, from_=180, to=0, orient=VERTICAL, length=300, width=28,
                    bg=C_PANEL, fg=C_WHITE, troughcolor=C_TROUGH,
                    activebackground=C_PURPLE, highlightthickness=0, bd=0,
-                   font=("Courier New", 7),
+                   showvalue=0,
                    command=lambda v, i=lid: self.update_leg(i, v))
         ls.set(0)
         ls.pack(fill=tk.Y, expand=True, padx=2, pady=2)
@@ -295,9 +295,9 @@ class GuiTeleop(Node):
 
         # Background grid
         for x in range(0, w, 40):
-            c.create_line(x, 0, x, h, fill="#0e2438", width=1)
+            c.create_line(x, 0, x, h, fill="#102840", width=1)
         for y in range(0, h, 40):
-            c.create_line(0, y, w, y, fill="#0e2438", width=1)
+            c.create_line(0, y, w, y, fill="#102840", width=1)
 
         # HUD corner brackets
         for bx, by, sx, sy in ((8,8,1,1),(w-8,8,-1,1),(8,h-8,1,-1),(w-8,h-8,-1,-1)):
@@ -314,7 +314,7 @@ class GuiTeleop(Node):
         c.create_rectangle(cx-bw-3, cy-bh-3, cx+bw+3, cy+bh+3,
                             outline=C_CYAN_DIM, fill="", width=1)
         c.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
-                            fill="#071a2e", outline=C_CYAN, width=2)
+                            fill="#0a2240", outline=C_CYAN, width=2)
         c.create_line(cx, cy-bh, cx, cy+bh, fill=C_CYAN_DIM, width=1)
         c.create_line(cx-bw, cy, cx+bw, cy, fill=C_CYAN_DIM, width=1)
         c.create_text(cx, cy - 8, text="ROBOT", fill=C_CYAN,
@@ -371,7 +371,7 @@ class GuiTeleop(Node):
             elif spd < 0:
                 col, dim = C_RED, C_RED_DIM
             else:
-                col, dim = C_GRAY, "#12283e"
+                col, dim = C_GRAY, "#152e48"
             c.itemconfig(self._diag_glow[i], outline=dim)
             c.itemconfig(self._diag_disc[i], outline=col)
             c.itemconfig(self._diag_dot[i],  fill=col)

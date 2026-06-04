@@ -4,7 +4,7 @@ from std_msgs.msg import Int32MultiArray, Bool
 from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
-BAUDRATE = 57600
+BAUDRATE = 1000000
 PORT = '/dev/ttyUSB0'
 MOTOR_IDS = [0, 1, 2, 3]
 
