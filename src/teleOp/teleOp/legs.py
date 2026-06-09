@@ -1,3 +1,9 @@
+import select
+import signal
+import sys
+import termios
+import threading
+import tty
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
@@ -5,7 +11,7 @@ from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
-PORT = '/dev/ttyUSB0'
+PORT = '/dev/ttyUSB1'
 MOTOR_IDS = [0, 1, 2, 3]
 
 ADDR_TORQUE_ENABLE = 64
@@ -15,6 +21,10 @@ TORQUE_DISABLE = 0
 
 # 0–180° → 0–2047 Dynamixel ticks  (full 360° = 4095 ticks)
 TICKS_PER_DEGREE = 4095.0 / 360.0
+
+# Motors 0 and 1 are mounted in the opposite direction, so their
+# command angles need to be mirrored (180 - angle).
+FLIPPED_MOTORS = {0, 1}
 
 
 class LegController(Node):
@@ -61,8 +71,14 @@ class LegController(Node):
                 f'Motor connection error ({e}) — leg node running in SIMULATION mode')
             return False
 
-    def _set_position(self, motor_id, angle_deg):
+    def _normalize_angle(self, motor_id, angle_deg):
         angle_deg = max(0, min(int(angle_deg), 180))
+        if motor_id in FLIPPED_MOTORS:
+            angle_deg = 180 - angle_deg
+        return angle_deg
+
+    def _set_position(self, motor_id, angle_deg):
+        angle_deg = self._normalize_angle(motor_id, angle_deg)
         position  = int(angle_deg * TICKS_PER_DEGREE)
         result, _ = self.packet.write4ByteTxRx(
             self.port, motor_id, ADDR_GOAL_POSITION, position)
@@ -94,31 +110,77 @@ class LegController(Node):
         else:
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
-                ticks = [int(max(0, min(a, 180)) * TICKS_PER_DEGREE)
-                         for a in leg_angles]
+                ticks = [int(self._normalize_angle(MOTOR_IDS[i], a) * TICKS_PER_DEGREE)
+                         for i, a in enumerate(leg_angles)]
                 self.get_logger().info(
                     f'[SIM] leg_angles={leg_angles}°  '
                     f'→ dynamixel_positions={ticks}')
 
-    def destroy_node(self):
-        if self._ready:
-            for mid in MOTOR_IDS:
-                self.packet.write1ByteTxRx(
-                    self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+    def _disable_motors(self):
+        if not self._ready:
+            return
+        self._ready = False
+        for mid in MOTOR_IDS:
+            try:
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+            except Exception:
+                pass
+        try:
             self.port.closePort()
+        except Exception:
+            pass
+
+    def destroy_node(self):
+        self._disable_motors()
+        try:
             self.get_logger().info('Leg motors disabled')
+        except Exception:
+            pass
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = LegController()
+
+    def handle_shutdown(*_):
+        node._disable_motors()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGHUP, handle_shutdown)
+
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+
+    if sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while spin_thread.is_alive():
+                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if r:
+                    ch = sys.stdin.read(1)
+                    if ch in ('\x1b', '\x03'):  # ESC or Ctrl+C
+                        node.get_logger().warn('ESC pressed — disabling leg motors and exiting')
+                        break
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    else:
+        try:
+            spin_thread.join()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        node.destroy_node()
+    except Exception:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

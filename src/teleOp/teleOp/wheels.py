@@ -1,3 +1,9 @@
+import select
+import signal
+import sys
+import termios
+import threading
+import tty
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
@@ -14,10 +20,10 @@ TORQUE_ENABLE  = 1
 TORQUE_DISABLE = 0
 
 # Keyboard sends -50..50; map to Dynamixel velocity units
-VELOCITY_SCALE = 4
+VELOCITY_SCALE = 6
 
 # Motors 0 and 3 are physically mounted in reverse on the chassis
-REVERSED_MOTORS = {0, 3}
+REVERSED_MOTORS = {2, 3}
 
 
 class WheelController(Node):
@@ -109,26 +115,72 @@ class WheelController(Node):
                     f'[SIM] wheel_speeds={wheel_speeds}  '
                     f'→ dynamixel_velocities={dxl_vals}')
 
-    def destroy_node(self):
-        if self._ready:
-            for mid in MOTOR_IDS:
-                self._set_velocity(mid, 0)
-                self.packet.write1ByteTxRx(
-                    self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+    def _disable_motors(self):
+        if not self._ready:
+            return
+        self._ready = False
+        for mid in MOTOR_IDS:
+            try:
+                self.packet.write4ByteTxRx(self.port, mid, ADDR_GOAL_VELOCITY, 0)
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+            except Exception:
+                pass
+        try:
             self.port.closePort()
+        except Exception:
+            pass
+
+    def destroy_node(self):
+        self._disable_motors()
+        try:
             self.get_logger().info('Wheel motors disabled')
+        except Exception:
+            pass
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = WheelController()
+
+    def handle_shutdown(*_):
+        node._disable_motors()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGHUP, handle_shutdown)
+
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+
+    if sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while spin_thread.is_alive():
+                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if r:
+                    ch = sys.stdin.read(1)
+                    if ch in ('\x1b', '\x03'):  # ESC or Ctrl+C
+                        node.get_logger().warn('ESC pressed — disabling wheel motors and exiting')
+                        break
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    else:
+        try:
+            spin_thread.join()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        node.destroy_node()
+    except Exception:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -14,7 +14,10 @@ services:
       - LOCAL_GID=${LOCAL_GID:-1000}
     network_mode: "host"
     ipc: host
-    devices: []
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB1:/dev/ttyUSB1
+      - /dev/bus/usb:/dev/bus/usb
     volumes:
       - ./:/workspace:rw
       - /tmp/.X11-unix:/tmp/.X11-unix:rw

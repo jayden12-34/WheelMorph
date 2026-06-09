@@ -60,7 +60,7 @@ class GuiTeleop(Node):
         self.lock        = threading.Lock()
 
         self.wheel_max  = 50
-        self.speed_pct  = 100
+        self.speed_pct  = 20
         self.dead_man   = True
         self._syncing   = False
         self._held_keys = []        # ordered list of currently-held movement keys
@@ -176,7 +176,7 @@ class GuiTeleop(Node):
             font=("Courier New", 8),
             command=lambda v: setattr(self, 'speed_pct', int(float(v))),
         )
-        self.speed_scale.set(100)
+        self.speed_scale.set(20)
         self.speed_scale.pack()
 
         # Checkboxes
@@ -451,12 +451,12 @@ class GuiTeleop(Node):
     def set_left(self):
         spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [-spd, spd, spd, -spd]
+            self.wheel_speed = [-spd, -spd, spd, spd]
 
     def set_right(self):
         spd = int(self.wheel_max * self.speed_pct / 100)
         with self.lock:
-            self.wheel_speed = [spd, -spd, -spd, spd]
+            self.wheel_speed = [spd, spd, -spd, -spd]
 
     def set_stop(self):
         with self.lock:
