@@ -35,6 +35,7 @@ _MOVE = {
 }
 
 
+
 def _sci_frame(parent, title, **kw):
     """LabelFrame with neon-cyan title and dark panel background."""
     return tk.LabelFrame(
@@ -55,16 +56,22 @@ class GuiTeleop(Node):
         self.pub       = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
         self.estop_pub = self.create_publisher(Bool, 'estop', 10)
 
-        self.wheel_speed = [0, 0, 0, 0]
-        self.leg_angles  = [0, 0, 0, 0]
-        self.lock        = threading.Lock()
+        self.wheel_speed    = [0, 0, 0, 0]
+        self.leg_angles     = [0, 0, 0, 0]
+        self.wheel_currents = [0, 0, 0, 0]
+        self.leg_currents   = [0, 0, 0, 0]
+        self.lock           = threading.Lock()
+
+        self.create_subscription(
+            Int32MultiArray, 'wheel_currents', self._wheel_currents_cb, 10)
+        self.create_subscription(
+            Int32MultiArray, 'leg_currents', self._leg_currents_cb, 10)
 
         self.wheel_max  = 50
         self.speed_pct  = 20
         self.dead_man   = True
         self._syncing   = False
         self._held_keys = []        # ordered list of currently-held movement keys
-        self._compact_panels = []   # corner panels hidden in compact mode
         self._hb_state  = False     # heartbeat blink state
 
         self.wheel_sliders = {}
@@ -98,10 +105,12 @@ class GuiTeleop(Node):
 
         self._build_header()
         self._build_control_bar()
+        self._build_readings_bar()
         self._build_main_area()
 
         self.root.bind('<KeyPress>',   self.on_key_press)
         self.root.bind('<KeyRelease>', self.on_key_release)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._poll_status()
         self._blink_heartbeat()
@@ -190,13 +199,6 @@ class GuiTeleop(Node):
                        font=("Courier New", 9),
                        command=lambda: setattr(self, 'dead_man',
                                                self.dead_man_var.get())).pack(anchor="w")
-        self.compact_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(opt, text="COMPACT MODE",
-                       variable=self.compact_var,
-                       bg=C_PANEL, fg=C_CYAN, selectcolor=C_DARK,
-                       activebackground=C_PANEL, activeforeground=C_CYAN,
-                       font=("Courier New", 9),
-                       command=self._toggle_compact).pack(anchor="w")
 
         # E-STOP
         tk.Button(bar, text="⚠\nE-STOP",
@@ -206,6 +208,58 @@ class GuiTeleop(Node):
                   relief=tk.RAISED, bd=3, width=8, height=3,
                   cursor="hand2",
                   command=self.emergency_stop).pack(side=tk.RIGHT, padx=20)
+
+    def _build_readings_bar(self):
+        bar = tk.Frame(self.root, bg=C_DARK, pady=5)
+        bar.pack(fill=tk.X, padx=4)
+
+        tk.Label(bar, text="CURRENT DRAW", bg=C_DARK, fg=C_CYAN_DIM,
+                 font=("Courier New", 8, "bold")).pack(side=tk.LEFT, padx=(10, 18))
+
+        # motor 0=FL, 1=BL, 2=FR, 3=BR after FL/BL fix
+        _corner = ["FL", "BL", "FR", "BR"]
+
+        self._reading_wheel_labels = {}
+        wf = tk.Frame(bar, bg=C_DARK)
+        wf.pack(side=tk.LEFT, padx=10)
+        tk.Label(wf, text="WHEELS (mA)", bg=C_DARK, fg=C_CYAN,
+                 font=("Courier New", 8, "bold")).grid(row=0, column=0, columnspan=4, pady=(0, 2))
+        for i in range(4):
+            tk.Label(wf, text=f"ID:{i}", bg=C_DARK, fg=C_GRAY,
+                     font=("Courier New", 7)).grid(row=1, column=i, padx=12)
+            tk.Label(wf, text=_corner[i], bg=C_DARK, fg=C_CYAN_DIM,
+                     font=("Courier New", 8, "bold")).grid(row=2, column=i, padx=12)
+            lbl = tk.Label(wf, text="0", bg=C_DARK, fg=C_GRAY,
+                           font=("Courier New", 11, "bold"), width=6)
+            lbl.grid(row=3, column=i, padx=12)
+            self._reading_wheel_labels[i] = lbl
+
+        tk.Frame(bar, bg=C_CYAN_DIM, width=1).pack(side=tk.LEFT, fill=tk.Y, padx=14, pady=2)
+
+        self._reading_leg_labels = {}
+        lf = tk.Frame(bar, bg=C_DARK)
+        lf.pack(side=tk.LEFT, padx=10)
+        tk.Label(lf, text="LEGS (mA)", bg=C_DARK, fg=C_CYAN,
+                 font=("Courier New", 8, "bold")).grid(row=0, column=0, columnspan=4, pady=(0, 2))
+        for i in range(4):
+            tk.Label(lf, text=f"ID:{i}", bg=C_DARK, fg=C_GRAY,
+                     font=("Courier New", 7)).grid(row=1, column=i, padx=12)
+            tk.Label(lf, text=_corner[i], bg=C_DARK, fg=C_CYAN_DIM,
+                     font=("Courier New", 8, "bold")).grid(row=2, column=i, padx=12)
+            lbl = tk.Label(lf, text="0", bg=C_DARK, fg=C_PURPLE_DIM,
+                           font=("Courier New", 11, "bold"), width=6)
+            lbl.grid(row=3, column=i, padx=12)
+            self._reading_leg_labels[i] = lbl
+
+        tk.Frame(bar, bg=C_CYAN_DIM, width=1).pack(side=tk.LEFT, fill=tk.Y, padx=14, pady=2)
+
+        tf = tk.Frame(bar, bg=C_DARK)
+        tf.pack(side=tk.LEFT, padx=14)
+        tk.Label(tf, text="TOTAL", bg=C_DARK, fg=C_CYAN,
+                 font=("Courier New", 8, "bold")).pack()
+        self._total_current_lbl = tk.Label(tf, text="0 mA", bg=C_DARK, fg=C_WHITE,
+                                           font=("Courier New", 13, "bold"), width=9)
+        self._total_current_lbl.pack(pady=4)
 
     def _build_main_area(self):
         main = tk.Frame(self.root, bg=C_BG)
@@ -219,13 +273,12 @@ class GuiTeleop(Node):
         main.grid_rowconfigure(1, weight=1)
 
         for wid, lid, row, col, title in (
-            (1, 1, 0, 0, "FL — FRONT LEFT"),
-            (0, 0, 1, 0, "BL — BACK LEFT"),
-            (2, 2, 0, 2, "FR — FRONT RIGHT"),
-            (3, 3, 1, 2, "BR — BACK RIGHT"),
+            (0, 0, 0, 0, "FL — FRONT LEFT  (ID:0)"),
+            (1, 1, 1, 0, "BL — BACK LEFT   (ID:1)"),
+            (2, 2, 0, 2, "FR — FRONT RIGHT (ID:2)"),
+            (3, 3, 1, 2, "BR — BACK RIGHT  (ID:3)"),
         ):
-            p = self._build_corner_panel(main, wid, lid, row, col, title)
-            self._compact_panels.append(p)
+            self._build_corner_panel(main, wid, lid, row, col, title)
 
         # Diagram — spans both rows in center column
         diag = _sci_frame(main, "ROBOT DIAGRAM")
@@ -322,10 +375,10 @@ class GuiTeleop(Node):
         c.create_text(cx, cy + 8, text="◊", fill=C_CYAN_DIM,
                       font=("Courier New", 8))
 
-        # Wheel positions
+        # Wheel positions: 0=FL(top-left), 1=BL(bottom-left), 2=FR(top-right), 3=BR(bottom-right)
         wheel_pos = {
-            0: (cx - 90, cy + 85),
-            1: (cx - 90, cy - 85),
+            0: (cx - 90, cy - 85),
+            1: (cx - 90, cy + 85),
             2: (cx + 90, cy - 85),
             3: (cx + 90, cy + 85),
         }
@@ -405,6 +458,8 @@ class GuiTeleop(Node):
         """Sync wheel sliders + diagram at 20 Hz, decoupled from key-repeat."""
         with self.lock:
             speeds = list(self.wheel_speed)
+            wcurr  = list(self.wheel_currents)
+            lcurr  = list(self.leg_currents)
 
         if speeds != self._last_ui_spd:
             self._last_ui_spd = speeds[:]
@@ -414,6 +469,22 @@ class GuiTeleop(Node):
                 color = C_GREEN if speeds[i] > 0 else (C_RED if speeds[i] < 0 else C_GRAY)
                 self.wheel_labels[i].config(text=str(speeds[i]), fg=color)
             self._syncing = False
+
+        total = 0
+        for i in range(4):
+            w = wcurr[i]
+            wc = C_GREEN if w > 20 else (C_RED if w < -20 else C_GRAY)
+            self._reading_wheel_labels[i].config(text=str(w), fg=wc)
+            total += abs(w)
+
+            l = lcurr[i]
+            lc = C_PURPLE if abs(l) > 20 else C_PURPLE_DIM
+            self._reading_leg_labels[i].config(text=str(l), fg=lc)
+            total += abs(l)
+
+        total_txt = f"{total / 1000:.2f} A" if total >= 1000 else f"{total} mA"
+        total_color = C_RED if total > 5000 else (C_CYAN if total > 500 else C_WHITE)
+        self._total_current_lbl.config(text=total_txt, fg=total_color)
 
         self.draw_robot_diagram()
         self.root.after(50, self._periodic_update)
@@ -495,6 +566,8 @@ class GuiTeleop(Node):
         elif k == 'space':
             self._held_keys.clear()
             self.set_stop()
+        elif k in ('escape', 'x'):
+            self._on_close()
 
     def on_key_release(self, e):
         k = e.keysym.lower()
@@ -509,19 +582,26 @@ class GuiTeleop(Node):
         else:
             getattr(self, f'set_{_MOVE[self._held_keys[-1]]}')()
 
+    def _on_close(self):
+        """Send estop + zero all actuators, then exit."""
+        self.emergency_stop()
+        self.root.after(150, self.root.destroy)
+
     # -----------------------------------------------------------------------
     # Options
     # -----------------------------------------------------------------------
 
-    def _toggle_compact(self):
-        if self.compact_var.get():
-            for p in self._compact_panels:
-                p.grid_remove()
-            self.root.geometry("600x760")
-        else:
-            for p in self._compact_panels:
-                p.grid()
-            self.root.geometry("1440x920")
+    # -----------------------------------------------------------------------
+    # Current reading callbacks
+    # -----------------------------------------------------------------------
+
+    def _wheel_currents_cb(self, msg):
+        with self.lock:
+            self.wheel_currents = list(msg.data[:4])
+
+    def _leg_currents_cb(self, msg):
+        with self.lock:
+            self.leg_currents = list(msg.data[:4])
 
     # -----------------------------------------------------------------------
     # ROS publish loop (background thread)
@@ -543,6 +623,9 @@ class GuiTeleop(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GuiTeleop()
+
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
 
     t = threading.Thread(target=node.publish_loop, daemon=True)
     t.start()

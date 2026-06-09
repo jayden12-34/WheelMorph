@@ -14,13 +14,17 @@ BAUDRATE = 1000000
 PORT = '/dev/ttyUSB0'
 MOTOR_IDS = [0, 1, 2, 3]
 
-ADDR_TORQUE_ENABLE = 64
-ADDR_GOAL_VELOCITY = 104
+ADDR_TORQUE_ENABLE   = 64
+ADDR_GOAL_VELOCITY   = 104
+ADDR_PRESENT_CURRENT = 126
 TORQUE_ENABLE  = 1
 TORQUE_DISABLE = 0
 
 # Keyboard sends -50..50; map to Dynamixel velocity units
 VELOCITY_SCALE = 6
+
+# mA per unit for Dynamixel X-series (XM/XH); adjust if using XL series (1.0 mA/unit)
+CURRENT_UNIT_MA = 2.69
 
 # Motors 0 and 3 are physically mounted in reverse on the chassis
 REVERSED_MOTORS = {2, 3}
@@ -40,6 +44,9 @@ class WheelController(Node):
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
         self.estop_sub = self.create_subscription(
             Bool, 'estop', self._estop_callback, 10)
+
+        self.currents_pub = self.create_publisher(Int32MultiArray, 'wheel_currents', 10)
+        self.create_timer(0.1, self._publish_currents)
 
     def _initialize(self):
         try:
@@ -114,6 +121,24 @@ class WheelController(Node):
                 self.get_logger().info(
                     f'[SIM] wheel_speeds={wheel_speeds}  '
                     f'→ dynamixel_velocities={dxl_vals}')
+
+    def _publish_currents(self):
+        currents = []
+        for mid in MOTOR_IDS:
+            if self._ready:
+                result, data, _ = self.packet.read2ByteTxRx(
+                    self.port, mid, ADDR_PRESENT_CURRENT)
+                if result == COMM_SUCCESS:
+                    if data > 32767:
+                        data -= 65536
+                    currents.append(int(data * CURRENT_UNIT_MA))
+                else:
+                    currents.append(0)
+            else:
+                currents.append(0)
+        msg = Int32MultiArray()
+        msg.data = currents
+        self.currents_pub.publish(msg)
 
     def _disable_motors(self):
         if not self._ready:

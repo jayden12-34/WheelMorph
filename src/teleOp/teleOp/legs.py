@@ -14,13 +14,17 @@ BAUDRATE = 1000000
 PORT = '/dev/ttyUSB1'
 MOTOR_IDS = [0, 1, 2, 3]
 
-ADDR_TORQUE_ENABLE = 64
-ADDR_GOAL_POSITION = 116
+ADDR_TORQUE_ENABLE   = 64
+ADDR_GOAL_POSITION   = 116
+ADDR_PRESENT_CURRENT = 126
 TORQUE_ENABLE  = 1
 TORQUE_DISABLE = 0
 
 # 0–180° → 0–2047 Dynamixel ticks  (full 360° = 4095 ticks)
 TICKS_PER_DEGREE = 4095.0 / 360.0
+
+# mA per unit for Dynamixel X-series (XM/XH); adjust if using XL series (1.0 mA/unit)
+CURRENT_UNIT_MA = 2.69
 
 # Motors 0 and 1 are mounted in the opposite direction, so their
 # command angles need to be mirrored (180 - angle).
@@ -41,6 +45,9 @@ class LegController(Node):
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
         self.estop_sub = self.create_subscription(
             Bool, 'estop', self._estop_callback, 10)
+
+        self.currents_pub = self.create_publisher(Int32MultiArray, 'leg_currents', 10)
+        self.create_timer(0.1, self._publish_currents)
 
     def _initialize(self):
         try:
@@ -115,6 +122,24 @@ class LegController(Node):
                 self.get_logger().info(
                     f'[SIM] leg_angles={leg_angles}°  '
                     f'→ dynamixel_positions={ticks}')
+
+    def _publish_currents(self):
+        currents = []
+        for mid in MOTOR_IDS:
+            if self._ready:
+                result, data, _ = self.packet.read2ByteTxRx(
+                    self.port, mid, ADDR_PRESENT_CURRENT)
+                if result == COMM_SUCCESS:
+                    if data > 32767:
+                        data -= 65536
+                    currents.append(int(data * CURRENT_UNIT_MA))
+                else:
+                    currents.append(0)
+            else:
+                currents.append(0)
+        msg = Int32MultiArray()
+        msg.data = currents
+        self.currents_pub.publish(msg)
 
     def _disable_motors(self):
         if not self._ready:
