@@ -127,7 +127,7 @@ class LegController(Node):
         currents = []
         for mid in MOTOR_IDS:
             if self._ready:
-                result, data, _ = self.packet.read2ByteTxRx(
+                data, result, _ = self.packet.read2ByteTxRx(
                     self.port, mid, ADDR_PRESENT_CURRENT)
                 if result == COMM_SUCCESS:
                     if data > 32767:
