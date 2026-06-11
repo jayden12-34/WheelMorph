@@ -11,7 +11,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', glob('launch/launch.py')),
+        ('share/' + package_name + '/launch', glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +29,7 @@ setup(
             'keyboard = teleOp.keyboard:main',
             'wheels = teleOp.wheels:main',
             'legs = teleOp.legs:main',
+            'web_teleop = teleOp.web_teleop:main',
         ],
     },
 )

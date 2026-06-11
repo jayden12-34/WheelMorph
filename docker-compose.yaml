@@ -12,16 +12,27 @@ services:
       - XAUTHORITY=/tmp/.docker-xauth
       - LOCAL_UID=${LOCAL_UID:-1000}
       - LOCAL_GID=${LOCAL_GID:-1000}
-    network_mode: "host"
+      # SDL joystick-only mode — pygame won't try to open a display window
+      - SDL_VIDEODRIVER=dummy
+      - SDL_AUDIODRIVER=dummy
+    network_mode: "host"  # web_teleop: UI on :8080, WebSocket on :8765
     ipc: host
     devices:
       - /dev/ttyUSB0:/dev/ttyUSB0
       - /dev/ttyUSB1:/dev/ttyUSB1
       - /dev/bus/usb:/dev/bus/usb
+    # Allow access to dynamically-created input devices (joystick, gamepad)
+    device_cgroup_rules:
+      - 'c 13:* rmw'
     volumes:
       - ./:/workspace:rw
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker-xauth:/tmp/.docker-xauth:rw
+      # Host Xauthority mounted read-only so the entrypoint can copy the
+      # MIT-MAGIC-COOKIE into /tmp/.docker-xauth with FamilyWild rewriting.
+      - ${XAUTHORITY:-~/.Xauthority}:/tmp/.host-xauth:ro
+      # Expose all input devices (gamepad/joystick) inside the container
+      - /dev/input:/dev/input
     working_dir: /workspace
     user: "root"
     shm_size: "1gb"

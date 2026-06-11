@@ -53,6 +53,13 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip \
     pyserial \
     keyboard || true
 
+# pygame + its SDL2 system libraries (needed for joystick input in headless containers)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsdl2-dev libsdl2-2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir pygame
+
 # Create non-root user (default UID/GID 1000; override at build-time with build args)
 ARG USERNAME=developer
 ARG USER_UID=1000

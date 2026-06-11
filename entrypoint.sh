@@ -6,17 +6,18 @@ if [ -f "/opt/ros/humble/setup.bash" ]; then
   source /opt/ros/humble/setup.bash
 fi
 
-# Prepare Xauthority for GUI if DISPLAY is set
+# Prepare Xauthority for GUI if DISPLAY is set.
+# /tmp/.host-xauth is the host's real Xauthority file, mounted read-only.
+# We rewrite its entries with FamilyWild (ffff) so they work from inside
+# the container regardless of hostname, then store them in /tmp/.docker-xauth.
 if [ -n "${DISPLAY:-}" ] && command -v xauth >/dev/null 2>&1; then
-  mkdir -p /tmp 2>/dev/null || true
   touch /tmp/.docker-xauth 2>/dev/null || true
   chmod 666 /tmp/.docker-xauth 2>/dev/null || true
-  
-  if xauth nlist "${DISPLAY}" >/dev/null 2>&1; then
-    xauth_list=$(xauth nlist "${DISPLAY}" 2>/dev/null || true)
-    if [ -n "$xauth_list" ]; then
-      echo "$xauth_list" | sed -e 's/^..../ffff/' | xauth -f /tmp/.docker-xauth nmerge - || true
-    fi
+
+  if [ -s /tmp/.host-xauth ]; then
+    xauth -f /tmp/.host-xauth nlist "${DISPLAY}" 2>/dev/null \
+      | sed -e 's/^..../ffff/' \
+      | xauth -f /tmp/.docker-xauth nmerge - 2>/dev/null || true
   fi
 fi
 

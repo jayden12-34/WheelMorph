@@ -1,3 +1,4 @@
+import os
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
@@ -7,6 +8,39 @@ from tkinter import Scale, VERTICAL, HORIZONTAL
 import threading
 import time
 import math
+
+try:
+    import pygame
+    _PYGAME_OK = True
+except ImportError:
+    _PYGAME_OK = False
+
+# ---------------------------------------------------------------------------
+# Steam Deck button/axis indices (SDL2 / hid-steam driver, no Steam Input)
+#   Adjust these constants if your system maps the device differently.
+# ---------------------------------------------------------------------------
+SD_AXIS_LX   = 0   # Left  stick horizontal (-1=left, +1=right)   → turn
+SD_AXIS_LY   = 1   # Left  stick vertical   (-1=up/fwd, +1=down)  → forward
+SD_AXIS_L2   = 2   # Left  trigger          (-1=rest,   +1=pressed)→ reset
+SD_AXIS_RY   = 4   # Right stick vertical   (push up = throttle)
+SD_DEADZONE  = 0.12
+SD_L2_THRESH = 0.0  # L2 value above this (any real press) triggers full reset
+
+SD_BTN_A     = 0   # South  — retract back-right  leg
+SD_BTN_B     = 1   # East   — retract front-right leg
+SD_BTN_X     = 2   # West   — retract back-left   leg
+SD_BTN_Y     = 3   # North  — retract front-left  leg
+SD_BTN_L1    = 4   # L1     — extend   all legs gradually
+SD_BTN_R1    = 5   # R1     — retract  all legs gradually
+
+# Back paddles — move individual wheel forward at current speed
+SD_BTN_L4    = 11  # upper-left  paddle → FL wheel
+SD_BTN_L5    = 13  # lower-left  paddle → BL wheel
+SD_BTN_R4    = 12  # upper-right paddle → FR wheel
+SD_BTN_R5    = 14  # lower-right paddle → BR wheel
+
+# Degrees to extend/retract per 50 ms poll tick while button is held (~60°/s)
+SD_LEG_STEP  = 3
 
 # ---------------------------------------------------------------------------
 # Iron Man HUD color palette
@@ -73,6 +107,8 @@ class GuiTeleop(Node):
         self._syncing   = False
         self._held_keys = []        # ordered list of currently-held movement keys
         self._hb_state  = False     # heartbeat blink state
+
+        self._sd_active = False     # Steam Deck mode on/off
 
         self.wheel_sliders = {}
         self.wheel_labels  = {}
@@ -199,6 +235,26 @@ class GuiTeleop(Node):
                        font=("Courier New", 9),
                        command=lambda: setattr(self, 'dead_man',
                                                self.dead_man_var.get())).pack(anchor="w")
+
+        # Steam Deck toggle
+        sd_frame = tk.Frame(bar, bg=C_PANEL)
+        sd_frame.pack(side=tk.RIGHT, padx=10)
+        sd_unavail = not _PYGAME_OK
+        self._sd_btn = tk.Button(
+            sd_frame,
+            text="STEAM DECK\n[OFF]",
+            font=("Courier New", 9, "bold"),
+            bg="#0c1a30", fg=C_GRAY,
+            activebackground="#0e3a60", activeforeground=C_CYAN,
+            relief=tk.FLAT, bd=0, width=11, height=3,
+            cursor="hand2" if not sd_unavail else "arrow",
+            state=tk.NORMAL if not sd_unavail else tk.DISABLED,
+            command=self._toggle_steamdeck,
+        )
+        self._sd_btn.pack()
+        if sd_unavail:
+            tk.Label(sd_frame, text="(pygame missing)", bg=C_PANEL,
+                     fg=C_GRAY, font=("Courier New", 7)).pack()
 
         # E-STOP
         tk.Button(bar, text="⚠\nE-STOP",
@@ -582,8 +638,149 @@ class GuiTeleop(Node):
         else:
             getattr(self, f'set_{_MOVE[self._held_keys[-1]]}')()
 
+    # -----------------------------------------------------------------------
+    # Steam Deck mode
+    # -----------------------------------------------------------------------
+
+    def _toggle_steamdeck(self):
+        if self._sd_active:
+            self._sd_active = False
+            self._sd_btn.config(text="STEAM DECK\n[OFF]", bg="#0c1a30", fg=C_GRAY)
+        else:
+            self._sd_active = True
+            self._sd_btn.config(text="STEAM DECK\n[ON]", bg="#073a22", fg=C_GREEN)
+            t = threading.Thread(target=self._steamdeck_loop, daemon=True)
+            t.start()
+
+    def _steamdeck_loop(self):
+        """Background thread: poll Steam Deck gamepad at 20 Hz and drive robot."""
+        # Use dummy video/audio drivers so pygame doesn't try to open a display
+        # window — joystick input works fine without a real video subsystem.
+        os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')
+        os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
+        pygame.init()
+        pygame.joystick.init()
+
+        joy = None
+        if pygame.joystick.get_count() == 0:
+            self.get_logger().warn('Steam Deck: no joystick detected — mode disabled')
+            self._sd_active = False
+            self.root.after(0, lambda: self._sd_btn.config(
+                text="STEAM DECK\n[OFF]", bg="#0c1a30", fg=C_GRAY))
+            pygame.quit()
+            return
+
+        joy = pygame.joystick.Joystick(0)
+        joy.init()
+        self.get_logger().info(f'Steam Deck: connected to "{joy.get_name()}"')
+
+        while self._sd_active and rclpy.ok():
+            pygame.event.pump()
+
+            # ------------------------------------------------------------------
+            # L2 (left trigger) → hard reset: zero all wheels and legs
+            # Axis value: -1.0 at rest, +1.0 fully pressed
+            # ------------------------------------------------------------------
+            if joy.get_axis(SD_AXIS_L2) > SD_L2_THRESH:
+                with self.lock:
+                    self.wheel_speed = [0, 0, 0, 0]
+                    self.leg_angles  = [0, 0, 0, 0]
+                time.sleep(0.05)
+                continue
+
+            # ------------------------------------------------------------------
+            # Right stick Y → throttle (push up = faster)
+            # -1.0 fully forward, 0 neutral, +1.0 fully back; clamped to [0, 1]
+            # ------------------------------------------------------------------
+            ry = joy.get_axis(SD_AXIS_RY)
+            throttle = max(0.0, -ry)
+            if throttle < SD_DEADZONE:
+                throttle = 0.0
+
+            # ------------------------------------------------------------------
+            # Left stick → arcade drive
+            # Y: forward/backward   X: turn left/right
+            # ------------------------------------------------------------------
+            ly = joy.get_axis(SD_AXIS_LY)
+            lx = joy.get_axis(SD_AXIS_LX)
+            if abs(ly) < SD_DEADZONE:
+                ly = 0.0
+            if abs(lx) < SD_DEADZONE:
+                lx = 0.0
+
+            effective_spd = throttle * self.wheel_max
+            forward = -ly * effective_spd   # stick up (-) → forward (+)
+            turn    =  lx * effective_spd   # stick right (+) → right turn
+
+            # FL=0, BL=1, FR=2, BR=3
+            def _clamp(v):
+                return int(max(-self.wheel_max, min(self.wheel_max, v)))
+
+            ws = [
+                _clamp(forward + turn),   # FL
+                _clamp(forward + turn),   # BL
+                _clamp(forward - turn),   # FR
+                _clamp(forward - turn),   # BR
+            ]
+
+            # ------------------------------------------------------------------
+            # D-pad → extend individual legs (hold = continuous ~60°/s)
+            # UP → FL (0)   LEFT → BL (1)   RIGHT → FR (2)   DOWN → BR (3)
+            # ------------------------------------------------------------------
+            with self.lock:
+                angles = list(self.leg_angles)
+
+            hx, hy = joy.get_hat(0)   # (x, y); y=+1=up
+            if hy == 1:   angles[0] = min(180, angles[0] + SD_LEG_STEP)
+            if hx == -1:  angles[1] = min(180, angles[1] + SD_LEG_STEP)
+            if hx == 1:   angles[2] = min(180, angles[2] + SD_LEG_STEP)
+            if hy == -1:  angles[3] = min(180, angles[3] + SD_LEG_STEP)
+
+            # ------------------------------------------------------------------
+            # L1 → extend all legs   R1 → retract all legs
+            # ------------------------------------------------------------------
+            if joy.get_button(SD_BTN_L1):
+                angles = [min(180, a + SD_LEG_STEP) for a in angles]
+            if joy.get_button(SD_BTN_R1):
+                angles = [max(0,   a - SD_LEG_STEP) for a in angles]
+
+            # ------------------------------------------------------------------
+            # Face buttons → snap individual leg to 0°
+            # Y → FL (0)   X → BL (1)   B → FR (2)   A → BR (3)
+            # ------------------------------------------------------------------
+            if joy.get_button(SD_BTN_Y):  angles[0] = 0
+            if joy.get_button(SD_BTN_X):  angles[1] = 0
+            if joy.get_button(SD_BTN_B):  angles[2] = 0
+            if joy.get_button(SD_BTN_A):  angles[3] = 0
+
+            # ------------------------------------------------------------------
+            # Back paddles → drive individual wheel forward at slider speed
+            # L4 → FL (0)   L5 → BL (1)   R4 → FR (2)   R5 → BR (3)
+            # ------------------------------------------------------------------
+            paddle_spd = max(1, int(self.wheel_max * self.speed_pct / 100.0))
+            if joy.get_button(SD_BTN_L4):  ws[0] = paddle_spd
+            if joy.get_button(SD_BTN_L5):  ws[1] = paddle_spd
+            if joy.get_button(SD_BTN_R4):  ws[2] = paddle_spd
+            if joy.get_button(SD_BTN_R5):  ws[3] = paddle_spd
+
+            with self.lock:
+                self.wheel_speed = ws
+                self.leg_angles  = angles
+
+            time.sleep(0.05)   # 20 Hz
+
+        # Zero wheels when mode exits
+        with self.lock:
+            self.wheel_speed = [0, 0, 0, 0]
+
+        if joy is not None:
+            joy.quit()
+        pygame.quit()
+        self.get_logger().info('Steam Deck: disconnected')
+
     def _on_close(self):
         """Send estop + zero all actuators, then exit."""
+        self._sd_active = False
         self.emergency_stop()
         self.root.after(150, self.root.destroy)
 
