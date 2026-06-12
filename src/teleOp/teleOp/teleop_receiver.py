@@ -11,7 +11,7 @@ CTRL_PORT  = 7700
 STATE_PORT = 7701
 
 SD_DEADZONE    = 0.12
-SD_LEG_STEP    = 15    # 5× original speed
+SD_LEG_STEP    = 30    # doubled step size
 
 FRONT_TRACK_CM = 23.0
 BACK_TRACK_CM  = 37.0
@@ -149,21 +149,23 @@ class TeleopReceiver(Node):
             clamp(forward - back_turn),   # BR
         ]
 
+        # dpad = retract individual legs  (left side)
         dpad = ctrl.get('dpad', [0, 0])
         dx, dy = int(dpad[0]), int(dpad[1])
-        if dy ==  1: angles[0] = min(180, angles[0] + SD_LEG_STEP)
-        if dx == -1: angles[1] = min(180, angles[1] + SD_LEG_STEP)
-        if dx ==  1: angles[2] = min(180, angles[2] + SD_LEG_STEP)
-        if dy == -1: angles[3] = min(180, angles[3] + SD_LEG_STEP)
+        if dy ==  1: angles[0] = max(0,   angles[0] - SD_LEG_STEP)
+        if dx == -1: angles[1] = max(0,   angles[1] - SD_LEG_STEP)
+        if dx ==  1: angles[2] = max(0,   angles[2] - SD_LEG_STEP)
+        if dy == -1: angles[3] = max(0,   angles[3] - SD_LEG_STEP)
 
-        if ctrl.get('l1'): angles = [min(180, a + SD_LEG_STEP) for a in angles]
-        if ctrl.get('r1'): angles = [max(0,   a - SD_LEG_STEP) for a in angles]
+        # L1 = retract all, R1 = extend all  (left=retract, right=extend)
+        if ctrl.get('l1'): angles = [max(0,   a - SD_LEG_STEP) for a in angles]
+        if ctrl.get('r1'): angles = [min(180, a + SD_LEG_STEP) for a in angles]
 
-        # face buttons snap leg to 0°  (Y=FL, X=BL, B=FR, A=BR)
-        if ctrl.get('btn_y'): angles[0] = 0
-        if ctrl.get('btn_x'): angles[1] = 0
-        if ctrl.get('btn_b'): angles[2] = 0
-        if ctrl.get('btn_a'): angles[3] = 0
+        # face buttons extend individual legs  (Y=FL, X=BL, B=FR, A=BR)
+        if ctrl.get('btn_y'): angles[0] = min(180, angles[0] + SD_LEG_STEP)
+        if ctrl.get('btn_x'): angles[1] = min(180, angles[1] + SD_LEG_STEP)
+        if ctrl.get('btn_b'): angles[2] = min(180, angles[2] + SD_LEG_STEP)
+        if ctrl.get('btn_a'): angles[3] = min(180, angles[3] + SD_LEG_STEP)
 
         paddle_spd = max(1, int(self.wheel_max * speed_pct / 100))
         if ctrl.get('l4'): ws[0] = paddle_spd

@@ -23,6 +23,9 @@ TORQUE_DISABLE = 0
 # Keyboard sends -50..50; map to Dynamixel velocity units
 VELOCITY_SCALE = 6
 
+# Fraction of normal velocity applied in compliant mode
+COMPLIANT_WHEEL_SCALE = 0.5
+
 # mA per unit for Dynamixel X-series (XM/XH); adjust if using XL series (1.0 mA/unit)
 CURRENT_UNIT_MA = 2.69
 
@@ -127,11 +130,8 @@ class WheelController(Node):
 
     def _compliant_callback(self, msg):
         self._compliant = msg.data
-        if not self._ready:
-            return
-        torque = TORQUE_DISABLE if msg.data else TORQUE_ENABLE
-        for mid in MOTOR_IDS:
-            self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, torque)
+        # Wheels stay torque-enabled in compliant mode; velocity is scaled down
+        # so they nominally follow commands but back-drive under moderate force.
         self.get_logger().info(f'Wheel compliant mode {"ON" if msg.data else "OFF"}')
 
     def listener_callback(self, msg):
@@ -140,17 +140,18 @@ class WheelController(Node):
             return
 
         wheel_speeds = list(msg.data[0:4])
+        scale = COMPLIANT_WHEEL_SCALE if self._compliant else 1.0
 
-        if self._ready and not self._compliant:
+        if self._ready:
             for i, speed in enumerate(wheel_speeds):
-                self._set_velocity(MOTOR_IDS[i], speed * VELOCITY_SCALE)
+                self._set_velocity(MOTOR_IDS[i], speed * VELOCITY_SCALE * scale)
         else:
             # Print sim output at ~1 Hz so the terminal stays readable
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
                 dxl_vals = [
-                    -(s * VELOCITY_SCALE) if i in REVERSED_MOTORS
-                    else s * VELOCITY_SCALE
+                    -(s * VELOCITY_SCALE * scale) if i in REVERSED_MOTORS
+                    else s * VELOCITY_SCALE * scale
                     for i, s in enumerate(wheel_speeds)
                 ]
                 self.get_logger().info(

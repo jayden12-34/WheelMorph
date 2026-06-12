@@ -498,26 +498,26 @@ class TeleopSender:
         cy = js_cy + js_r + 20
 
         # D-pad
-        cy = self._section_hdr('D-PAD  —  EXTEND LEGS', x, cy, w)
+        cy = self._section_hdr('D-PAD  —  RETRACT LEGS', x, cy, w)
         cy += 4
         dp = self.ctrl['dpad']
         dpad_rows = [
-            ('▲ UP',    'FL leg', dp[1] == 1),
-            ('◄ LEFT',  'BL leg', dp[0] == -1),
-            ('► RIGHT', 'FR leg', dp[0] == 1),
-            ('▼ DOWN',  'BR leg', dp[1] == -1),
+            ('▲ UP',    'FL leg ▼', dp[1] == 1),
+            ('◄ LEFT',  'BL leg ▼', dp[0] == -1),
+            ('► RIGHT', 'FR leg ▼', dp[0] == 1),
+            ('▼ DOWN',  'BR leg ▼', dp[1] == -1),
         ]
         for arrow, corner, active in dpad_rows:
-            col = GREEN if active else GRAY
+            col = RED if active else GRAY
             self._mini_btn(f'{arrow}  →  {corner}', x + 8, cy, w - 16, 22, active, col)
             cy += 26
 
         cy += 4
-        self._mini_btn('L1  —  EXTEND ALL LEGS',   x + 8, cy, w - 16, 24,
-                       self.ctrl['l1'], GREEN)
+        self._mini_btn('L1  —  RETRACT ALL LEGS',  x + 8, cy, w - 16, 24,
+                       self.ctrl['l1'], RED)
         cy += 28
-        self._mini_btn('R1  —  RETRACT ALL LEGS',  x + 8, cy, w - 16, 24,
-                       self.ctrl['r1'], RED)
+        self._mini_btn('R1  —  EXTEND ALL LEGS',   x + 8, cy, w - 16, 24,
+                       self.ctrl['r1'], GREEN)
 
     def _draw_right_panel(self, rect: pygame.Rect):
         pygame.draw.rect(self.screen, PANEL, rect)
@@ -537,7 +537,7 @@ class TeleopSender:
         cy = js_cy + js_r + 20
 
         # Face buttons
-        cy = self._section_hdr('FACE BUTTONS  —  SNAP LEG 0°', x, cy, w)
+        cy = self._section_hdr('FACE BUTTONS  —  EXTEND LEGS', x, cy, w)
         cy += 4
         face_rows = [
             ('Y', 'FL', self.ctrl['btn_y'], YELLOW),
@@ -546,7 +546,7 @@ class TeleopSender:
             ('A', 'BR', self.ctrl['btn_a'], GREEN_BTN),
         ]
         for lbl, corner, active, col in face_rows:
-            self._mini_btn(f'{lbl}  →  {corner} leg → 0°', x + 8, cy, w - 16, 22, active, col)
+            self._mini_btn(f'{lbl}  →  {corner} leg ▲', x + 8, cy, w - 16, 22, active, col)
             cy += 26
 
         cy += 4
