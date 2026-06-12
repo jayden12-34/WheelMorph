@@ -21,6 +21,17 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
+# Steam Deck's system Python ships without pip — bootstrap it if missing
+if ! "$PYTHON" -m pip --version &>/dev/null; then
+    echo "pip not found — bootstrapping..."
+    if "$PYTHON" -m ensurepip --upgrade &>/dev/null; then
+        echo "pip installed via ensurepip"
+    else
+        echo "ensurepip failed, downloading get-pip.py..."
+        curl -sSL https://bootstrap.pypa.io/get-pip.py | "$PYTHON" --user
+    fi
+fi
+
 for pkg in pygame pyinstaller; do
     if ! "$PYTHON" -c "import $pkg" 2>/dev/null; then
         echo "Installing $pkg..."
