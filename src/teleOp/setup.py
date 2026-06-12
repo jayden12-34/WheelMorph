@@ -30,6 +30,8 @@ setup(
             'wheels = teleOp.wheels:main',
             'legs = teleOp.legs:main',
             'web_teleop = teleOp.web_teleop:main',
+            'teleop_receiver = teleOp.teleop_receiver:main',
+            'teleop_sender = teleOp.pygame_sender:main',
         ],
     },
 )
