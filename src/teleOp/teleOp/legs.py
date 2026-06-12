@@ -39,12 +39,17 @@ class LegController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready = self._initialize()
+        self._ready     = self._initialize()
+        self._compliant = False
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
         self.estop_sub = self.create_subscription(
             Bool, 'estop', self._estop_callback, 10)
+        self.reset_sub = self.create_subscription(
+            Bool, 'motor_reset', self._motor_reset_callback, 10)
+        self.compliant_sub = self.create_subscription(
+            Bool, 'compliant_mode', self._compliant_callback, 10)
 
         self.currents_pub = self.create_publisher(Int32MultiArray, 'leg_currents', 10)
         self.create_timer(0.1, self._publish_currents)
@@ -104,6 +109,36 @@ class LegController(Node):
         else:
             self.get_logger().warn('[SIM] Emergency stop acknowledged')
 
+    def _motor_reset_callback(self, msg):
+        if not msg.data:
+            return
+        self.get_logger().info('Motor reset: reconnecting leg motors')
+        all_ok = True
+        for mid in MOTOR_IDS:
+            result, error = self.packet.write1ByteTxRx(
+                self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+            if result != COMM_SUCCESS or error != 0:
+                all_ok = False
+        if all_ok:
+            self._ready = True
+            self.get_logger().info('Leg motors reconnected')
+        else:
+            self.get_logger().warn('Re-enable failed — retrying full init')
+            try:
+                self.port.closePort()
+            except Exception:
+                pass
+            self._ready = self._initialize()
+
+    def _compliant_callback(self, msg):
+        self._compliant = msg.data
+        if not self._ready:
+            return
+        torque = TORQUE_DISABLE if msg.data else TORQUE_ENABLE
+        for mid in MOTOR_IDS:
+            self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, torque)
+        self.get_logger().info(f'Leg compliant mode {"ON" if msg.data else "OFF"}')
+
     def listener_callback(self, msg):
         if len(msg.data) < 8:
             self.get_logger().warn(f'Expected 8 values, got {len(msg.data)}')
@@ -111,7 +146,7 @@ class LegController(Node):
 
         leg_angles = list(msg.data[4:8])
 
-        if self._ready:
+        if self._ready and not self._compliant:
             for i, angle in enumerate(leg_angles):
                 self._set_position(MOTOR_IDS[i], angle)
         else:

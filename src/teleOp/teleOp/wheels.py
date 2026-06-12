@@ -12,7 +12,7 @@ from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
 PORT = '/dev/ttyUSB0'
-MOTOR_IDS = [0, 1, 2, 3]
+MOTOR_IDS = [1, 0, 2, 3]  # FL/BL physically swapped — motor 1 = FL, motor 0 = BL
 
 ADDR_TORQUE_ENABLE   = 64
 ADDR_GOAL_VELOCITY   = 104
@@ -38,12 +38,17 @@ class WheelController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready = self._initialize()
+        self._ready     = self._initialize()
+        self._compliant = False
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
         self.estop_sub = self.create_subscription(
             Bool, 'estop', self._estop_callback, 10)
+        self.reset_sub = self.create_subscription(
+            Bool, 'motor_reset', self._motor_reset_callback, 10)
+        self.compliant_sub = self.create_subscription(
+            Bool, 'compliant_mode', self._compliant_callback, 10)
 
         self.currents_pub = self.create_publisher(Int32MultiArray, 'wheel_currents', 10)
         self.create_timer(0.1, self._publish_currents)
@@ -99,6 +104,36 @@ class WheelController(Node):
         else:
             self.get_logger().warn('[SIM] Emergency stop — all wheel speeds → 0')
 
+    def _motor_reset_callback(self, msg):
+        if not msg.data:
+            return
+        self.get_logger().info('Motor reset: reconnecting wheel motors')
+        all_ok = True
+        for mid in MOTOR_IDS:
+            result, error = self.packet.write1ByteTxRx(
+                self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+            if result != COMM_SUCCESS or error != 0:
+                all_ok = False
+        if all_ok:
+            self._ready = True
+            self.get_logger().info('Wheel motors reconnected')
+        else:
+            self.get_logger().warn('Re-enable failed — retrying full init')
+            try:
+                self.port.closePort()
+            except Exception:
+                pass
+            self._ready = self._initialize()
+
+    def _compliant_callback(self, msg):
+        self._compliant = msg.data
+        if not self._ready:
+            return
+        torque = TORQUE_DISABLE if msg.data else TORQUE_ENABLE
+        for mid in MOTOR_IDS:
+            self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, torque)
+        self.get_logger().info(f'Wheel compliant mode {"ON" if msg.data else "OFF"}')
+
     def listener_callback(self, msg):
         if len(msg.data) < 4:
             self.get_logger().warn(f'Expected ≥4 values, got {len(msg.data)}')
@@ -106,7 +141,7 @@ class WheelController(Node):
 
         wheel_speeds = list(msg.data[0:4])
 
-        if self._ready:
+        if self._ready and not self._compliant:
             for i, speed in enumerate(wheel_speeds):
                 self._set_velocity(MOTOR_IDS[i], speed * VELOCITY_SCALE)
         else:

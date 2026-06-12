@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python3 ~/.claude/token-status.py)"
+    ],
+    "additionalDirectories": [
+      "/home/box/.claude"
+    ]
+  }
+}

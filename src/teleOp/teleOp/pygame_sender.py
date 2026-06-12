@@ -56,6 +56,9 @@ SD_BTN_L5 = 13   # lower-left  paddle → BL wheel
 SD_BTN_R4 = 12   # upper-right paddle → FR wheel
 SD_BTN_R5 = 14   # lower-right paddle → BR wheel
 
+SMOOTH_ALPHA  = 0.25   # axis low-pass per 60fps tick (~167 ms to 94% of target)
+THROTTLE_RATE = 60.0   # % per second at full joystick deflection
+
 WIN_W, WIN_H = 1280, 720
 SIDE_W       = 265
 HDR_H        = 36
@@ -126,6 +129,11 @@ class TeleopSender:
         # Motor reset flash state
         self._reset_flash = 0.0
 
+        self._smooth_lx     = 0.0
+        self._smooth_ly     = 0.0
+        self.compliant_mode = False
+        self._compliant_rect = pygame.Rect(0, 0, 0, 0)
+
     # ── Networking ───────────────────────────────────────────────────────────
 
     def _recv_loop(self):
@@ -170,6 +178,15 @@ class TeleopSender:
         self._send_special('motor_reset')
         self._reset_flash = 0.8
 
+    def do_compliant_toggle(self):
+        self.compliant_mode = not self.compliant_mode
+        try:
+            self._ctrl_sock.sendto(
+                json.dumps({'type': 'compliant', 'value': self.compliant_mode}).encode(),
+                (self.host, self.ctrl_port))
+        except Exception:
+            pass
+
     # ── Gamepad ──────────────────────────────────────────────────────────────
 
     def _connect_joy(self):
@@ -180,7 +197,7 @@ class TeleopSender:
             except Exception:
                 self.joy = None
 
-    def _poll_gamepad(self):
+    def _poll_gamepad(self, dt: float = 1 / 60):
         if self.joy is None:
             return
 
@@ -198,21 +215,28 @@ class TeleopSender:
             l2_raw = axis(SD_AXIS_L2)
             self.ctrl['l2'] = l2_raw > 0.0
             if self.ctrl['l2']:
+                self._smooth_lx = 0.0
+                self._smooth_ly = 0.0
                 self.ctrl.update(lx=0.0, ly=0.0, ry=0.0)
                 return
 
-            # Left stick arcade drive
-            lx = axis(SD_AXIS_LX)
-            ly = axis(SD_AXIS_LY)
-            self.ctrl['lx'] = lx if abs(lx) >= SD_DEADZONE else 0.0
-            self.ctrl['ly'] = ly if abs(ly) >= SD_DEADZONE else 0.0
+            # Left stick arcade drive — low-pass smoothed
+            lx_raw = axis(SD_AXIS_LX)
+            ly_raw = axis(SD_AXIS_LY)
+            lx_raw = lx_raw if abs(lx_raw) >= SD_DEADZONE else 0.0
+            ly_raw = ly_raw if abs(ly_raw) >= SD_DEADZONE else 0.0
+            self._smooth_lx += SMOOTH_ALPHA * (lx_raw - self._smooth_lx)
+            self._smooth_ly += SMOOTH_ALPHA * (ly_raw - self._smooth_ly)
+            self.ctrl['lx'] = self._smooth_lx
+            self.ctrl['ly'] = self._smooth_ly
 
-            # Right stick Y — throttle (push up → negative axis → speed up)
+            # Right stick Y — rate-based throttle: up increases, down decreases
             ry = axis(SD_AXIS_RY)
-            self.ctrl['ry'] = ry if abs(ry) >= SD_DEADZONE else 0.0
-            throttle = max(0.0, -self.ctrl['ry'])
-            if throttle >= SD_DEADZONE:
-                self.speed_pct = int(throttle * 100)
+            ry_val = ry if abs(ry) >= SD_DEADZONE else 0.0
+            self.ctrl['ry'] = ry_val
+            if abs(ry_val) > 0:
+                delta = -ry_val * THROTTLE_RATE * dt
+                self.speed_pct = max(0, min(100, int(self.speed_pct + delta)))
 
             # Shoulder buttons
             self.ctrl['l1'] = btn(SD_BTN_L1)
@@ -254,7 +278,7 @@ class TeleopSender:
         while self.running:
             dt = self.clock.tick(60) / 1000.0
             self._process_events()
-            self._poll_gamepad()
+            self._poll_gamepad(dt)
 
             self._hb_timer_tick(dt)
             if self._reset_flash > 0:
@@ -292,6 +316,8 @@ class TeleopSender:
                     self.do_estop()
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
+                elif ev.key == pygame.K_c:
+                    self.do_compliant_toggle()
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 p = ev.pos
@@ -299,6 +325,8 @@ class TeleopSender:
                     self.do_estop()
                 elif self._reset_rect.collidepoint(p):
                     self.do_motor_reset()
+                elif self._compliant_rect.collidepoint(p):
+                    self.do_compliant_toggle()
                 elif self._spd_track.collidepoint(p):
                     self._speed_dragging = True
                     self._set_speed_from_x(p[0])
@@ -401,10 +429,24 @@ class TeleopSender:
         host_s = self.font_sm.render(f'HOST: {self.host}:{self.ctrl_port}', True, GRAY)
         self._blit_center_y(host_s, cx, mid_y)
 
-        # Motor Reset button
+        # Compliant mode toggle button
         BW, BH = 140, 30
-        mr_x = W - BW * 2 - 30
+        cm_x = W - BW * 3 - 50
         mr_y = mid_y - BH // 2
+        cm_rect = pygame.Rect(cm_x, mr_y, BW, BH)
+        cm_on  = self.compliant_mode
+        cm_bg  = (0, 50, 20) if cm_on else DARK
+        cm_fg  = GREEN       if cm_on else CYAN_DIM
+        pygame.draw.rect(self.screen, cm_bg, cm_rect, border_radius=4)
+        pygame.draw.rect(self.screen, cm_fg, cm_rect, 1, border_radius=4)
+        cm_lbl = '◎ COMPLIANT  [C]' if cm_on else '○ COMPLIANT  [C]'
+        cm_s = self.font_sm.render(cm_lbl, True, GREEN if cm_on else GRAY)
+        self.screen.blit(cm_s, (cm_x + BW // 2 - cm_s.get_width() // 2,
+                                 mr_y + BH // 2 - cm_s.get_height() // 2))
+        self._compliant_rect = cm_rect
+
+        # Motor Reset button
+        mr_x = W - BW * 2 - 30
         mr_rect = pygame.Rect(mr_x, mr_y, BW, BH)
         flash = self._reset_flash > 0
         mr_bg  = CYAN_DIM if flash else DARK
