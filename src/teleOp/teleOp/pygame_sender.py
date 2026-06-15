@@ -37,12 +37,13 @@ YELLOW     = (255, 255, 64)
 BLUE_BTN   = (64,  128, 255)
 RED_BTN    = (255, 64,  64)
 GREEN_BTN  = (64,  255, 64)
+ORANGE     = (255, 165, 0)
 
 # ── Gamepad axis / button mapping (Steam Deck SDL2, no Steam Input) ──────────
 SD_AXIS_LX  = 0   # left  stick X
 SD_AXIS_LY  = 1   # left  stick Y  (-1=fwd)
 SD_AXIS_L2  = 2   # left  trigger  (-1=rest, +1=pressed)
-SD_AXIS_RY  = 4   # right stick Y  (-1=up/throttle)
+SD_AXIS_RY  = 4   # right stick Y  (-1=up/more torque)
 SD_DEADZONE = 0.12
 
 SD_BTN_A  = 0    # south  — snap BR leg to 0°
@@ -81,7 +82,7 @@ class TeleopSender:
         )
 
         self.state = dict(
-            wheel_speed=[0]*4, leg_angles=[0]*4,
+            wheel_torque=[0]*4, leg_angles=[0]*4,
             wheel_currents=[0]*4, leg_currents=[0]*4,
             speed_pct=20,
         )
@@ -129,10 +130,8 @@ class TeleopSender:
         # Motor reset flash state
         self._reset_flash = 0.0
 
-        self._smooth_lx     = 0.0
-        self._smooth_ly     = 0.0
-        self.compliant_mode = False
-        self._compliant_rect = pygame.Rect(0, 0, 0, 0)
+        self._smooth_lx = 0.0
+        self._smooth_ly = 0.0
 
     # ── Networking ───────────────────────────────────────────────────────────
 
@@ -178,15 +177,6 @@ class TeleopSender:
         self._send_special('motor_reset')
         self._reset_flash = 0.8
 
-    def do_compliant_toggle(self):
-        self.compliant_mode = not self.compliant_mode
-        try:
-            self._ctrl_sock.sendto(
-                json.dumps({'type': 'compliant', 'value': self.compliant_mode}).encode(),
-                (self.host, self.ctrl_port))
-        except Exception:
-            pass
-
     # ── Gamepad ──────────────────────────────────────────────────────────────
 
     def _connect_joy(self):
@@ -230,7 +220,7 @@ class TeleopSender:
             self.ctrl['lx'] = self._smooth_lx
             self.ctrl['ly'] = self._smooth_ly
 
-            # Right stick Y — rate-based throttle: up increases, down decreases
+            # Right stick Y — rate-based torque limit: up increases, down decreases
             ry = axis(SD_AXIS_RY)
             ry_val = ry if abs(ry) >= SD_DEADZONE else 0.0
             self.ctrl['ry'] = ry_val
@@ -316,8 +306,6 @@ class TeleopSender:
                     self.do_estop()
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
-                elif ev.key == pygame.K_c:
-                    self.do_compliant_toggle()
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 p = ev.pos
@@ -325,8 +313,6 @@ class TeleopSender:
                     self.do_estop()
                 elif self._reset_rect.collidepoint(p):
                     self.do_motor_reset()
-                elif self._compliant_rect.collidepoint(p):
-                    self.do_compliant_toggle()
                 elif self._spd_track.collidepoint(p):
                     self._speed_dragging = True
                     self._set_speed_from_x(p[0])
@@ -404,8 +390,8 @@ class TeleopSender:
         mid_y = y + BAR_H // 2
         cx = 12
 
-        # Speed label
-        lbl = self.font_sm.render('SPEED %', True, CYAN)
+        # Torque limit label
+        lbl = self.font_sm.render('TORQUE %', True, CYAN)
         self._blit_center_y(lbl, cx, mid_y)
         cx += lbl.get_width() + 10
 
@@ -429,21 +415,8 @@ class TeleopSender:
         host_s = self.font_sm.render(f'HOST: {self.host}:{self.ctrl_port}', True, GRAY)
         self._blit_center_y(host_s, cx, mid_y)
 
-        # Compliant mode toggle button
         BW, BH = 140, 30
-        cm_x = W - BW * 3 - 50
         mr_y = mid_y - BH // 2
-        cm_rect = pygame.Rect(cm_x, mr_y, BW, BH)
-        cm_on  = self.compliant_mode
-        cm_bg  = (0, 50, 20) if cm_on else DARK
-        cm_fg  = GREEN       if cm_on else CYAN_DIM
-        pygame.draw.rect(self.screen, cm_bg, cm_rect, border_radius=4)
-        pygame.draw.rect(self.screen, cm_fg, cm_rect, 1, border_radius=4)
-        cm_lbl = '◎ COMPLIANT  [C]' if cm_on else '○ COMPLIANT  [C]'
-        cm_s = self.font_sm.render(cm_lbl, True, GREEN if cm_on else GRAY)
-        self.screen.blit(cm_s, (cm_x + BW // 2 - cm_s.get_width() // 2,
-                                 mr_y + BH // 2 - cm_s.get_height() // 2))
-        self._compliant_rect = cm_rect
 
         # Motor Reset button
         mr_x = W - BW * 2 - 30
@@ -526,13 +499,13 @@ class TeleopSender:
 
         cy = self._section_hdr('RIGHT CONTROLS', x, cy, w)
 
-        # Right stick (throttle, Y-only)
+        # Right stick (torque limit, Y-only)
         js_r  = 52
         js_cx = x + w // 2
         js_cy = cy + js_r + 14
         self._draw_joystick(js_cx, js_cy, js_r,
                             0, self.ctrl['ry'],
-                            GREEN, 'RIGHT STICK  —  THROTTLE',
+                            GREEN, 'RIGHT STICK  —  TORQUE LIMIT',
                             y_only=True)
         cy = js_cy + js_r + 20
 
@@ -566,18 +539,18 @@ class TeleopSender:
         x, y, w, h = rect.x, rect.y, rect.width, rect.height
 
         with self._state_lock:
-            ws  = list(self.state['wheel_speed'])
+            wt  = list(self.state['wheel_torque'])
             la  = list(self.state['leg_angles'])
             wc  = list(self.state['wheel_currents'])
             lc  = list(self.state['leg_currents'])
 
         cy = y + 6
 
-        # Wheel speeds
-        cy = self._section_hdr('WHEEL SPEEDS', x, cy, w)
+        # Commanded torque
+        cy = self._section_hdr('WHEEL TORQUE CMD', x, cy, w)
         cy += 4
         cy = self._draw_4cell_row(x, cy, w, 38,
-                                  ['FL', 'FR', 'BL', 'BR'], [ws[0], ws[2], ws[1], ws[3]],
+                                  ['FL', 'FR', 'BL', 'BR'], [wt[0], wt[2], wt[1], wt[3]],
                                   lambda v: GREEN if v > 0 else (RED if v < 0 else GRAY),
                                   lambda v: str(v), CYAN_DIM)
         cy += 4
@@ -593,14 +566,14 @@ class TeleopSender:
 
         # Robot diagram
         cy = self._section_hdr('ROBOT DIAGRAM', x, cy, w)
-        remaining = h - (cy - y) - 70
+        remaining = h - (cy - y) - 100
         diag_h    = max(80, remaining)
         diag_rect = pygame.Rect(x + 4, cy, w - 8, diag_h)
-        self._draw_robot_diagram(diag_rect, ws)
+        self._draw_robot_diagram(diag_rect, wt, wc)
         cy += diag_h + 6
 
-        # Current draw
-        cy = self._section_hdr('CURRENT DRAW', x, cy, w)
+        # Current draw — commanded vs actual side by side
+        cy = self._section_hdr('CURRENT DRAW (mA)', x, cy, w)
         cy += 4
         hw = w // 2
         q  = hw // 4
@@ -608,9 +581,9 @@ class TeleopSender:
         vals_w = [wc[0], wc[2], wc[1], wc[3]]
         vals_l = [lc[0], lc[2], lc[1], lc[3]]
 
-        wc_hdr = self.font_sm.render('WHEELS (mA)', True, CYAN)
+        wc_hdr = self.font_sm.render('WHEELS actual (mA)', True, CYAN)
         self.screen.blit(wc_hdr, (x + 4, cy))
-        lc_hdr = self.font_sm.render('LEGS (mA)', True, CYAN)
+        lc_hdr = self.font_sm.render('LEGS actual (mA)', True, CYAN)
         self.screen.blit(lc_hdr, (x + hw + 4, cy))
         cy += wc_hdr.get_height() + 3
 
@@ -636,7 +609,7 @@ class TeleopSender:
         tot_s = self.font_med.render(tot_txt, True, tot_col)
         self.screen.blit(tot_s, (x + w // 2 - tot_s.get_width() // 2, cy))
 
-    def _draw_robot_diagram(self, rect: pygame.Rect, speeds: list):
+    def _draw_robot_diagram(self, rect: pygame.Rect, torques: list, currents: list):
         pygame.draw.rect(self.screen, DARK, rect, border_radius=4)
         pygame.draw.rect(self.screen, CYAN_DIM, rect, 1, border_radius=4)
 
@@ -671,17 +644,22 @@ class TeleopSender:
             (cx + wxo, cy + wyo, 'BR', 3),
         ]
         for wx, wy, lbl, i in wheel_positions:
-            s   = speeds[i]
-            col = GREEN if s > 0 else (RED if s < 0 else GRAY)
-            dim = GREEN_DIM if s > 0 else (RED_DIM if s < 0 else (21, 46, 72))
+            t   = torques[i]
+            ma  = currents[i]
+            col = GREEN if t > 0 else (RED if t < 0 else GRAY)
+            dim = GREEN_DIM if t > 0 else (RED_DIM if t < 0 else (21, 46, 72))
+            # Highlight ring orange if actual current diverges significantly from command
+            stall = t != 0 and abs(ma) < 50
+            ring_col = ORANGE if stall else col
             pygame.draw.circle(self.screen, dim, (wx, wy), 18, 5)
             pygame.draw.circle(self.screen, DARK, (wx, wy), 12)
-            pygame.draw.circle(self.screen, col,  (wx, wy), 12, 2)
-            pygame.draw.circle(self.screen, col,  (wx, wy), 3)
+            pygame.draw.circle(self.screen, ring_col, (wx, wy), 12, 2)
+            pygame.draw.circle(self.screen, ring_col, (wx, wy), 3)
             lbl_s = self.font_sm.render(lbl, True, col)
             self.screen.blit(lbl_s, (wx - lbl_s.get_width() // 2, wy - 26))
-            spd_s = self.font_sm.render(str(s), True, WHITE)
-            self.screen.blit(spd_s, (wx - spd_s.get_width() // 2, wy + 20))
+            # Show actual current in mA below the wheel
+            ma_s = self.font_sm.render(f'{ma}mA', True, WHITE)
+            self.screen.blit(ma_s, (wx - ma_s.get_width() // 2, wy + 20))
 
     def _draw_joystick(self, cx: int, cy: int, r: int,
                        jx: float, jy: float, col, label: str,

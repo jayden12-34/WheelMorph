@@ -28,21 +28,19 @@ class TeleopReceiver(Node):
         ctrl_port  = self.get_parameter('ctrl_port').value
         state_port = self.get_parameter('state_port').value
 
-        self.pub           = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
-        self.estop_pub     = self.create_publisher(Bool, 'estop', 10)
-        self.reset_pub     = self.create_publisher(Bool, 'motor_reset', 10)
-        self.compliant_pub = self.create_publisher(Bool, 'compliant_mode', 10)
+        self.pub       = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
+        self.estop_pub = self.create_publisher(Bool, 'estop', 10)
+        self.reset_pub = self.create_publisher(Bool, 'motor_reset', 10)
 
         self.create_subscription(Int32MultiArray, 'wheel_currents', self._wheel_cb, 10)
         self.create_subscription(Int32MultiArray, 'leg_currents',   self._leg_cb,   10)
 
-        self.wheel_speed    = [0, 0, 0, 0]
+        self.wheel_cmd      = [0, 0, 0, 0]
         self.leg_angles     = [0, 0, 0, 0]
         self.wheel_currents = [0, 0, 0, 0]
         self.leg_currents   = [0, 0, 0, 0]
         self.speed_pct      = 20
         self.wheel_max      = 50
-        self.compliant      = False
         self.lock           = threading.Lock()
 
         self._sender_addr = None
@@ -96,9 +94,6 @@ class TeleopReceiver(Node):
                 self._emergency_stop()
             elif t == 'motor_reset':
                 threading.Thread(target=self._motor_reset, daemon=True).start()
-            elif t == 'compliant':
-                val = bool(msg.get('value', False))
-                threading.Thread(target=self._set_compliant, args=(val,), daemon=True).start()
             elif t == 'speed_pct':
                 with self.lock:
                     self.speed_pct = max(0, min(100, int(msg.get('value', 20))))
@@ -115,9 +110,9 @@ class TeleopReceiver(Node):
 
         if ctrl.get('l2'):
             with self.lock:
-                self.wheel_speed = [0, 0, 0, 0]
-                self.leg_angles  = [0, 0, 0, 0]
-                self.speed_pct   = speed_pct
+                self.wheel_cmd  = [0, 0, 0, 0]
+                self.leg_angles = [0, 0, 0, 0]
+                self.speed_pct  = speed_pct
             return
 
         lx = float(ctrl.get('lx', 0))
@@ -174,14 +169,14 @@ class TeleopReceiver(Node):
         if ctrl.get('r5'): ws[3] = paddle_spd
 
         with self.lock:
-            self.wheel_speed = ws
-            self.leg_angles  = angles
-            self.speed_pct   = speed_pct
+            self.wheel_cmd  = ws
+            self.leg_angles = angles
+            self.speed_pct  = speed_pct
 
     def _emergency_stop(self):
         with self.lock:
-            self.wheel_speed = [0, 0, 0, 0]
-            self.leg_angles  = [0, 0, 0, 0]
+            self.wheel_cmd  = [0, 0, 0, 0]
+            self.leg_angles = [0, 0, 0, 0]
         zero = Int32MultiArray()
         zero.data = [0] * 8
         self.pub.publish(zero)
@@ -192,8 +187,8 @@ class TeleopReceiver(Node):
     def _motor_reset(self):
         """Zero all outputs, signal motor reset, then release."""
         with self.lock:
-            self.wheel_speed = [0, 0, 0, 0]
-            self.leg_angles  = [0, 0, 0, 0]
+            self.wheel_cmd  = [0, 0, 0, 0]
+            self.leg_angles = [0, 0, 0, 0]
         zero = Int32MultiArray()
         zero.data = [0] * 8
         self.pub.publish(zero)
@@ -206,14 +201,6 @@ class TeleopReceiver(Node):
         self.reset_pub.publish(msg)
         self.get_logger().info('Motor reset complete')
 
-    def _set_compliant(self, val: bool):
-        with self.lock:
-            self.compliant = val
-        m = Bool()
-        m.data = val
-        self.compliant_pub.publish(m)
-        self.get_logger().info(f'Compliant mode {"ON" if val else "OFF"}')
-
     # ── Publish / state loops ────────────────────────────────────────────────
 
     def _publish_loop(self):
@@ -221,7 +208,7 @@ class TeleopReceiver(Node):
         while rclpy.ok():
             msg = Int32MultiArray()
             with self.lock:
-                msg.data = list(self.wheel_speed) + list(self.leg_angles)
+                msg.data = list(self.wheel_cmd) + list(self.leg_angles)
             self.pub.publish(msg)
             time.sleep(dt)
 
@@ -233,7 +220,7 @@ class TeleopReceiver(Node):
                 with self.lock:
                     payload = json.dumps({
                         'type':           'state',
-                        'wheel_speed':    list(self.wheel_speed),
+                        'wheel_torque':   list(self.wheel_cmd),
                         'leg_angles':     list(self.leg_angles),
                         'wheel_currents': list(self.wheel_currents),
                         'leg_currents':   list(self.leg_currents),

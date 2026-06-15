@@ -16,6 +16,7 @@ MOTOR_IDS = [0, 1, 2, 3]
 
 ADDR_TORQUE_ENABLE   = 64
 ADDR_GOAL_POSITION   = 116
+ADDR_PRESENT_POSITION = 132
 ADDR_PRESENT_CURRENT = 126
 TORQUE_ENABLE  = 1
 TORQUE_DISABLE = 0
@@ -25,6 +26,9 @@ TICKS_PER_DEGREE = 4095.0 / 360.0
 
 # mA per unit for Dynamixel X-series (XM/XH); adjust if using XL series (1.0 mA/unit)
 CURRENT_UNIT_MA = 2.69
+
+# Compliant mode: hold position (don't advance toward target) above this current draw
+COMPLIANT_CURRENT_THRESHOLD_MA = 400
 
 # Motors 0 and 1 are mounted in the opposite direction, so their
 # command angles need to be mirrored (180 - angle).
@@ -39,8 +43,9 @@ class LegController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready     = self._initialize()
-        self._compliant = False
+        self._ready       = self._initialize()
+        self._compliant   = False
+        self._leg_targets = [90] * len(MOTOR_IDS)
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
@@ -132,11 +137,8 @@ class LegController(Node):
 
     def _compliant_callback(self, msg):
         self._compliant = msg.data
-        if not self._ready:
-            return
-        torque = TORQUE_DISABLE if msg.data else TORQUE_ENABLE
-        for mid in MOTOR_IDS:
-            self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, torque)
+        # Torque stays on in compliant mode — the current-monitoring timer
+        # backs off under resistance rather than going fully passive.
         self.get_logger().info(f'Leg compliant mode {"ON" if msg.data else "OFF"}')
 
     def listener_callback(self, msg):
@@ -146,10 +148,13 @@ class LegController(Node):
 
         leg_angles = list(msg.data[4:8])
 
+        for i, angle in enumerate(leg_angles):
+            self._leg_targets[i] = angle
+
         if self._ready and not self._compliant:
             for i, angle in enumerate(leg_angles):
                 self._set_position(MOTOR_IDS[i], angle)
-        else:
+        elif not self._ready:
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
                 ticks = [int(self._normalize_angle(MOTOR_IDS[i], a) * TICKS_PER_DEGREE)
@@ -157,17 +162,36 @@ class LegController(Node):
                 self.get_logger().info(
                     f'[SIM] leg_angles={leg_angles}°  '
                     f'→ dynamixel_positions={ticks}')
+        # In compliant mode with ready hardware, the current-monitoring timer
+        # drives toward _leg_targets and backs off under high resistance.
+
+    def _read_present_position(self, motor_id):
+        data, result, _ = self.packet.read4ByteTxRx(
+            self.port, motor_id, ADDR_PRESENT_POSITION)
+        return data if result == COMM_SUCCESS else None
 
     def _publish_currents(self):
         currents = []
-        for mid in MOTOR_IDS:
+        for i, mid in enumerate(MOTOR_IDS):
             if self._ready:
                 data, result, _ = self.packet.read2ByteTxRx(
                     self.port, mid, ADDR_PRESENT_CURRENT)
                 if result == COMM_SUCCESS:
                     if data > 32767:
                         data -= 65536
-                    currents.append(int(data * CURRENT_UNIT_MA))
+                    current_ma = int(data * CURRENT_UNIT_MA)
+                    currents.append(current_ma)
+
+                    if self._compliant:
+                        if abs(current_ma) > COMPLIANT_CURRENT_THRESHOLD_MA:
+                            # Strong resistance — freeze at current position
+                            present = self._read_present_position(mid)
+                            if present is not None:
+                                self.packet.write4ByteTxRx(
+                                    self.port, mid, ADDR_GOAL_POSITION, present)
+                        else:
+                            # No resistance — drive toward commanded target
+                            self._set_position(mid, self._leg_targets[i])
                 else:
                     currents.append(0)
             else:
