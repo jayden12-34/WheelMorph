@@ -306,23 +306,23 @@ class TeleopSender:
                     self.do_estop()
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
-                elif ev.key == pygame.K_4:
+                elif ev.key == pygame.K_v:
                     self.ctrl['l4'] = True
-                elif ev.key == pygame.K_5:
+                elif ev.key == pygame.K_b:
                     self.ctrl['l5'] = True
-                elif ev.key == pygame.K_6:
+                elif ev.key == pygame.K_n:
                     self.ctrl['r4'] = True
-                elif ev.key == pygame.K_7:
+                elif ev.key == pygame.K_m:
                     self.ctrl['r5'] = True
 
             elif ev.type == pygame.KEYUP:
-                if ev.key == pygame.K_4:
+                if ev.key == pygame.K_v:
                     self.ctrl['l4'] = False
-                elif ev.key == pygame.K_5:
+                elif ev.key == pygame.K_b:
                     self.ctrl['l5'] = False
-                elif ev.key == pygame.K_6:
+                elif ev.key == pygame.K_n:
                     self.ctrl['r4'] = False
-                elif ev.key == pygame.K_7:
+                elif ev.key == pygame.K_m:
                     self.ctrl['r5'] = False
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
@@ -544,10 +544,10 @@ class TeleopSender:
         cy = self._section_hdr('PADDLES  —  SPIN WHEEL', x, cy, w)
         cy += 4
         paddle_rows = [
-            ('L4', 'FL wheel', self.ctrl['l4']),
-            ('L5', 'BL wheel', self.ctrl['l5']),
-            ('R4', 'FR wheel', self.ctrl['r4']),
-            ('R5', 'BR wheel', self.ctrl['r5']),
+            ('L4 [V]', 'FL wheel', self.ctrl['l4']),
+            ('L5 [B]', 'BL wheel', self.ctrl['l5']),
+            ('R4 [N]', 'FR wheel', self.ctrl['r4']),
+            ('R5 [M]', 'BR wheel', self.ctrl['r5']),
         ]
         for lbl, desc, active in paddle_rows:
             self._mini_btn(f'{lbl}  →  {desc}', x + 8, cy, w - 16, 22, active, PURPLE)
