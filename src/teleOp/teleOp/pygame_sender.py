@@ -306,6 +306,24 @@ class TeleopSender:
                     self.do_estop()
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
+                elif ev.key == pygame.K_4:
+                    self.ctrl['l4'] = True
+                elif ev.key == pygame.K_5:
+                    self.ctrl['l5'] = True
+                elif ev.key == pygame.K_6:
+                    self.ctrl['r4'] = True
+                elif ev.key == pygame.K_7:
+                    self.ctrl['r5'] = True
+
+            elif ev.type == pygame.KEYUP:
+                if ev.key == pygame.K_4:
+                    self.ctrl['l4'] = False
+                elif ev.key == pygame.K_5:
+                    self.ctrl['l5'] = False
+                elif ev.key == pygame.K_6:
+                    self.ctrl['r4'] = False
+                elif ev.key == pygame.K_7:
+                    self.ctrl['r5'] = False
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 p = ev.pos
