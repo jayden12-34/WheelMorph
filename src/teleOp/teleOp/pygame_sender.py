@@ -121,6 +121,7 @@ class TeleopSender:
 
         self._speed_dragging = False
         self._send_timer     = 0.0
+        self._raw_btns_pressed: set[int] = set()
 
         # Clickable rects (populated each frame)
         self._estop_rect = pygame.Rect(0, 0, 0, 0)
@@ -258,6 +259,11 @@ class TeleopSender:
                     (1 if right else 0) - (1 if left else 0),
                     (1 if up   else 0) - (1 if down else 0),
                 ]
+
+            # Track all raw button indices that are currently pressed
+            self._raw_btns_pressed = {
+                i for i in range(n_btns) if self.joy.get_button(i)
+            }
 
         except Exception:
             pass
@@ -552,6 +558,19 @@ class TeleopSender:
         for lbl, desc, active in paddle_rows:
             self._mini_btn(f'{lbl}  →  {desc}', x + 8, cy, w - 16, 22, active, PURPLE)
             cy += 26
+
+        # Raw button debug — shows which indices are pressed right now
+        cy += 4
+        cy = self._section_hdr('RAW BTNS PRESSED', x, cy, w)
+        cy += 2
+        if self.joy:
+            n_total = self.joy.get_numbuttons()
+            pressed = sorted(self._raw_btns_pressed)
+            dbg_txt = f'n={n_total}  pressed={pressed if pressed else "none"}'
+        else:
+            dbg_txt = 'no gamepad'
+        dbg_s = self.font_sm.render(dbg_txt, True, YELLOW)
+        self.screen.blit(dbg_s, (x + w // 2 - dbg_s.get_width() // 2, cy))
 
     def _draw_center_panel(self, rect: pygame.Rect):
         x, y, w, h = rect.x, rect.y, rect.width, rect.height

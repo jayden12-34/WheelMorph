@@ -11,7 +11,7 @@ from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
-PORT = '/dev/ttyUSB0'
+PORT = '/dev/ttyUSB1'
 MOTOR_IDS = [1, 0, 2, 3]  # FL/BL physically swapped — motor 1 = FL, motor 0 = BL
 
 ADDR_OPERATING_MODE  = 11

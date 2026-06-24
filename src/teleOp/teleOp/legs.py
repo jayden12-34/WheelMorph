@@ -11,7 +11,7 @@ from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
-PORT = '/dev/ttyUSB1'
+PORT = '/dev/ttyUSB0'
 MOTOR_IDS = [0, 1, 2, 3]
 
 ADDR_TORQUE_ENABLE   = 64
