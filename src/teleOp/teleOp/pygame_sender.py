@@ -122,6 +122,7 @@ class TeleopSender:
         self._speed_dragging = False
         self._send_timer     = 0.0
         self._raw_btns_pressed: set[int] = set()
+        self._kb_paddles = {'l4': False, 'l5': False, 'r4': False, 'r5': False}
 
         # Clickable rects (populated each frame)
         self._estop_rect = pygame.Rect(0, 0, 0, 0)
@@ -189,6 +190,9 @@ class TeleopSender:
                 self.joy = None
 
     def _poll_gamepad(self, dt: float = 1 / 60):
+        # Always merge keyboard paddle state even when no joystick is present
+        for k in ('l4', 'l5', 'r4', 'r5'):
+            self.ctrl[k] = self._kb_paddles[k]
         if self.joy is None:
             return
 
@@ -239,11 +243,11 @@ class TeleopSender:
             self.ctrl['btn_x'] = btn(SD_BTN_X)
             self.ctrl['btn_y'] = btn(SD_BTN_Y)
 
-            # Back paddles
-            self.ctrl['l4'] = btn(SD_BTN_L4)
-            self.ctrl['l5'] = btn(SD_BTN_L5)
-            self.ctrl['r4'] = btn(SD_BTN_R4)
-            self.ctrl['r5'] = btn(SD_BTN_R5)
+            # Back paddles — OR with keyboard so Steam Input key-mapped paddles work too
+            self.ctrl['l4'] = btn(SD_BTN_L4) or self._kb_paddles['l4']
+            self.ctrl['l5'] = btn(SD_BTN_L5) or self._kb_paddles['l5']
+            self.ctrl['r4'] = btn(SD_BTN_R4) or self._kb_paddles['r4']
+            self.ctrl['r5'] = btn(SD_BTN_R5) or self._kb_paddles['r5']
 
             # D-pad (hat preferred, buttons as fallback for standard mapping)
             if self.joy.get_numhats() > 0:
@@ -313,23 +317,23 @@ class TeleopSender:
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
                 elif ev.key == pygame.K_v:
-                    self.ctrl['l4'] = True
+                    self._kb_paddles['l4'] = True
                 elif ev.key == pygame.K_b:
-                    self.ctrl['l5'] = True
+                    self._kb_paddles['l5'] = True
                 elif ev.key == pygame.K_n:
-                    self.ctrl['r4'] = True
+                    self._kb_paddles['r4'] = True
                 elif ev.key == pygame.K_m:
-                    self.ctrl['r5'] = True
+                    self._kb_paddles['r5'] = True
 
             elif ev.type == pygame.KEYUP:
                 if ev.key == pygame.K_v:
-                    self.ctrl['l4'] = False
+                    self._kb_paddles['l4'] = False
                 elif ev.key == pygame.K_b:
-                    self.ctrl['l5'] = False
+                    self._kb_paddles['l5'] = False
                 elif ev.key == pygame.K_n:
-                    self.ctrl['r4'] = False
+                    self._kb_paddles['r4'] = False
                 elif ev.key == pygame.K_m:
-                    self.ctrl['r5'] = False
+                    self._kb_paddles['r5'] = False
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 p = ev.pos
