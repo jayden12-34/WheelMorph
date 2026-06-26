@@ -115,6 +115,12 @@ canvas.js{border-radius:50%;touch-action:none;cursor:crosshair;}
 #diag{position:absolute;top:0;left:0;width:100%;height:100%;}
 
 /* ── Current bar ── */
+@keyframes ocharge-pulse{
+  0%,100%{border-color:var(--red);box-shadow:0 0 4px var(--red);}
+  50%{border-color:#ff8800;box-shadow:0 0 14px #ff8800;color:#ff8800;}
+}
+.ocharge-on{animation:ocharge-pulse .35s infinite;background:var(--rdim);}
+
 #curr-bar{width:100%;background:var(--dark);border:1px solid var(--cdim);
   border-radius:4px;padding:5px 8px;font-size:9px;flex-shrink:0;}
 .curr-row{display:flex;gap:14px;margin-top:3px;}
@@ -144,6 +150,10 @@ canvas.js{border-radius:50%;touch-action:none;cursor:crosshair;}
     <label>SPEED %</label>
     <input type="range" id="spd-range" min="0" max="100" value="20">
     <span id="spd-num">20%</span>
+    <button class="btn btn-p" id="btn-mode"
+      style="width:100px;height:28px;font-size:10px;">⚡ TORQUE</button>
+    <button class="btn btn-r" id="btn-ocharge"
+      style="width:116px;height:28px;font-size:10px;font-weight:bold;">⚠ OVERCHARGE</button>
     <button class="btn btn-r" id="btn-l2"
       style="width:80px;height:28px;font-size:10px;">L2 RESET</button>
     <button class="btn" id="btn-estop"
@@ -294,6 +304,7 @@ const raw = {
   l4:false, l5:false, r4:false, r5:false,
   btn_a:false, btn_b:false, btn_x:false, btn_y:false,
   dp_up:false, dp_down:false, dp_left:false, dp_right:false,
+  overcharge:false,
 };
 
 function buildMsg() {
@@ -308,6 +319,7 @@ function buildMsg() {
       (raw.dp_right?1:0)-(raw.dp_left?1:0),
       (raw.dp_up?1:0)-(raw.dp_down?1:0),
     ],
+    overcharge: raw.overcharge,
   });
 }
 
@@ -320,6 +332,9 @@ function applyState(d) {
   if (d.speed_pct !== undefined) {
     sldEl.value = d.speed_pct;
     document.getElementById('spd-num').textContent = d.speed_pct + '%';
+  }
+  if (d.drive_mode !== undefined && d.drive_mode !== driveMode) {
+    setMode(d.drive_mode);
   }
   for (let i=0;i<4;i++) {
     const v = d.wheel_speed[i];
@@ -474,6 +489,55 @@ function tapBtn(id, key) {
   el.addEventListener('mousedown', dn);
 }
 
+// ════════════════════════════════════════════════
+// Drive mode toggle (Torque ↔ Velocity)
+// ════════════════════════════════════════════════
+let driveMode = 0;
+const modeBtn = document.getElementById('btn-mode');
+const ochEl   = document.getElementById('btn-ocharge');
+
+function setMode(m) {
+  driveMode = m;
+  if (m === 0) {
+    modeBtn.textContent = '⚡ TORQUE';
+    modeBtn.style.color       = 'var(--purple)';
+    modeBtn.style.borderColor = 'var(--pdim)';
+    ochEl.disabled     = false;
+    ochEl.style.opacity = '1';
+  } else {
+    modeBtn.textContent = '◎ VELOCITY';
+    modeBtn.style.color       = 'var(--green)';
+    modeBtn.style.borderColor = 'var(--gdim)';
+    ochEl.disabled     = true;
+    ochEl.style.opacity = '0.35';
+    raw.overcharge = false;
+    ochEl.classList.remove('pressed','ocharge-on');
+  }
+  if (wsReady) ws.send(JSON.stringify({type:'mode', value:driveMode}));
+}
+modeBtn.addEventListener('click', ()=>setMode(driveMode?0:1));
+modeBtn.addEventListener('touchstart', e=>{e.preventDefault();setMode(driveMode?0:1);},{passive:false});
+
+// ════════════════════════════════════════════════
+// Overcharge button (hold — torque mode only)
+// ════════════════════════════════════════════════
+const ochDown = e=>{
+  e.preventDefault();
+  if(ochEl.disabled) return;
+  raw.overcharge=true;
+  ochEl.classList.add('pressed','ocharge-on');
+};
+const ochUp = e=>{
+  e.preventDefault();
+  raw.overcharge=false;
+  ochEl.classList.remove('pressed','ocharge-on');
+};
+ochEl.addEventListener('touchstart', ochDown, {passive:false});
+ochEl.addEventListener('touchend',   ochUp,   {passive:false});
+ochEl.addEventListener('mousedown',  ochDown);
+ochEl.addEventListener('mouseup',    ochUp);
+ochEl.addEventListener('mouseleave', ochUp);
+
 holdBtn('btn-l1','l1'); holdBtn('btn-r1','r1');
 holdBtn('btn-l4','l4'); holdBtn('btn-l5','l5');
 holdBtn('btn-r4','r4'); holdBtn('btn-r5','r5');
@@ -591,6 +655,8 @@ class WebTeleop(Node):
         self.leg_currents   = [0, 0, 0, 0]
         self.wheel_max      = 50
         self.speed_pct      = 20
+        self.drive_mode     = 0    # 0 = torque/current, 1 = velocity
+        self.overcharge     = False
         self.lock           = threading.Lock()
 
         self._ctrl = dict(lx=0.0, ly=0.0, ry=0.0,
@@ -685,6 +751,7 @@ class WebTeleop(Node):
         with self.lock:
             self.wheel_speed = [0, 0, 0, 0]
             self.leg_angles  = [0, 0, 0, 0]
+            self.overcharge  = False
         msg = Int32MultiArray()
         msg.data = [0] * 8
         self.pub.publish(msg)
@@ -702,7 +769,8 @@ class WebTeleop(Node):
             self.process_ctrl(ctrl)
             msg = Int32MultiArray()
             with self.lock:
-                msg.data = self.wheel_speed + self.leg_angles
+                msg.data = (self.wheel_speed + self.leg_angles +
+                            [self.drive_mode, int(self.overcharge)])
             self.pub.publish(msg)
             time.sleep(dt)
 
@@ -717,6 +785,7 @@ class WebTeleop(Node):
                 'wheel_currents': list(self.wheel_currents),
                 'leg_currents':   list(self.leg_currents),
                 'speed_pct':      self.speed_pct,
+                'drive_mode':     self.drive_mode,
                 'linked':         self.pub.get_subscription_count() > 0,
             })
 
@@ -742,10 +811,16 @@ async def ws_client(node: WebTeleop, websocket):
                     for k in _CTRL_FIELDS:
                         if k in msg:
                             node._ctrl[k] = msg[k]
+                    if 'overcharge' in msg:
+                        node.overcharge = bool(msg.get('overcharge', False))
             elif t == 'estop':
                 node.emergency_stop()
             elif t == 'speed_pct':
-                node.speed_pct = max(0, min(100, int(msg.get('value', 20))))
+                with node.lock:
+                    node.speed_pct = max(0, min(100, int(msg.get('value', 20))))
+            elif t == 'mode':
+                with node.lock:
+                    node.drive_mode = max(0, min(1, int(msg.get('value', 0))))
     finally:
         with node._ws_clients_lock:
             node._ws_clients.discard(websocket)

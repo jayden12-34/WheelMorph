@@ -23,9 +23,15 @@ TORQUE_DISABLE       = 0
 CURRENT_CONTROL_MODE = 0
 
 # Teleop sends -50..50; map to Dynamixel current units (2.69 mA/unit on XM/XH series)
-# Scale of 8 → max ±400 units ≈ ±1076 mA — within continuous rating of XM430-W350
-CURRENT_SCALE   = 8
-CURRENT_UNIT_MA = 2.69
+# Scale of 12 → max ±600 units ≈ ±1614 mA continuous on XM430-W350
+CURRENT_SCALE            = 12
+OVERCHARGE_CURRENT_UNITS = 743   # ≈ 2 A (743 units × 2.69 mA/unit)
+CURRENT_UNIT_MA          = 2.69
+
+# Velocity control mode
+VELOCITY_CONTROL_MODE = 1
+ADDR_GOAL_VELOCITY    = 104     # 4-byte register
+VELOCITY_SCALE        = 7       # 50 × 7 = 350 units ≈ 80 RPM on XM430-W350
 
 # Motors 2 and 3 are physically mounted in reverse on the chassis
 REVERSED_MOTORS = {2, 3}
@@ -39,8 +45,9 @@ class WheelController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready     = self._initialize()
-        self._last_cmds = [0] * len(MOTOR_IDS)
+        self._ready      = self._initialize()
+        self._last_cmds  = [0] * len(MOTOR_IDS)
+        self._drive_mode = CURRENT_CONTROL_MODE
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
@@ -100,6 +107,29 @@ class WheelController(Node):
         if result != COMM_SUCCESS:
             self.get_logger().warn(f'Current write failed for motor {motor_id}')
 
+    def _set_velocity(self, motor_id, velocity):
+        if motor_id in REVERSED_MOTORS:
+            velocity = -velocity
+        raw = int(velocity) & 0xFFFFFFFF  # 4-byte two's complement
+        result, _ = self.packet.write4ByteTxRx(
+            self.port, motor_id, ADDR_GOAL_VELOCITY, raw)
+        if result != COMM_SUCCESS:
+            self.get_logger().warn(f'Velocity write failed for motor {motor_id}')
+
+    def _switch_mode(self, new_mode):
+        for mid in MOTOR_IDS:
+            if self._ready:
+                if self._drive_mode == CURRENT_CONTROL_MODE:
+                    self._set_current(mid, 0)
+                else:
+                    self._set_velocity(mid, 0)
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_OPERATING_MODE, new_mode)
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+        self._drive_mode = new_mode
+        mode_name = 'VELOCITY' if new_mode == VELOCITY_CONTROL_MODE else 'TORQUE/CURRENT'
+        self.get_logger().info(f'Wheel drive mode → {mode_name}')
+
     def _estop_callback(self, msg):
         if not msg.data:
             return
@@ -146,22 +176,47 @@ class WheelController(Node):
             return
 
         wheel_cmds = list(msg.data[0:4])
+        new_mode   = int(msg.data[8]) if len(msg.data) > 8 else CURRENT_CONTROL_MODE
+        overcharge = bool(msg.data[9]) if len(msg.data) > 9 else False
+
+        if new_mode != self._drive_mode:
+            self._switch_mode(new_mode)
 
         if self._ready:
-            for i, cmd in enumerate(wheel_cmds):
-                self._last_cmds[i] = cmd
-                self._set_current(MOTOR_IDS[i], cmd * CURRENT_SCALE)
+            if self._drive_mode == CURRENT_CONTROL_MODE:
+                for i, cmd in enumerate(wheel_cmds):
+                    self._last_cmds[i] = cmd
+                    if overcharge and cmd != 0:
+                        sign = 1 if cmd > 0 else -1
+                        self._set_current(MOTOR_IDS[i], sign * OVERCHARGE_CURRENT_UNITS)
+                    else:
+                        self._set_current(MOTOR_IDS[i], cmd * CURRENT_SCALE)
+            else:
+                for i, cmd in enumerate(wheel_cmds):
+                    self._last_cmds[i] = cmd
+                    self._set_velocity(MOTOR_IDS[i], cmd * VELOCITY_SCALE)
         else:
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
-                dxl_vals = [
-                    -(c * CURRENT_SCALE) if i in REVERSED_MOTORS
-                    else c * CURRENT_SCALE
-                    for i, c in enumerate(wheel_cmds)
-                ]
-                self.get_logger().info(
-                    f'[SIM] wheel_cmds={wheel_cmds}  '
-                    f'→ dynamixel_current_units={dxl_vals}')
+                if self._drive_mode == CURRENT_CONTROL_MODE:
+                    dxl_vals = [
+                        -(c * CURRENT_SCALE) if i in REVERSED_MOTORS
+                        else c * CURRENT_SCALE
+                        for i, c in enumerate(wheel_cmds)
+                    ]
+                    self.get_logger().info(
+                        f'[SIM] wheel_cmds={wheel_cmds}  '
+                        f'→ dynamixel_current_units={dxl_vals}'
+                        + (' [OVERCHARGE]' if overcharge else ''))
+                else:
+                    dxl_vals = [
+                        -(c * VELOCITY_SCALE) if i in REVERSED_MOTORS
+                        else c * VELOCITY_SCALE
+                        for i, c in enumerate(wheel_cmds)
+                    ]
+                    self.get_logger().info(
+                        f'[SIM] wheel_cmds={wheel_cmds}  '
+                        f'→ dynamixel_velocity_units={dxl_vals}')
 
     def _publish_currents(self):
         currents = []

@@ -14,12 +14,14 @@ BAUDRATE = 1000000
 PORT = '/dev/ttyUSB0'
 MOTOR_IDS = [0, 1, 2, 3]
 
-ADDR_TORQUE_ENABLE   = 64
-ADDR_GOAL_POSITION   = 116
+ADDR_OPERATING_MODE   = 11
+ADDR_TORQUE_ENABLE    = 64
+ADDR_GOAL_POSITION    = 116
 ADDR_PRESENT_POSITION = 132
-ADDR_PRESENT_CURRENT = 126
-TORQUE_ENABLE  = 1
-TORQUE_DISABLE = 0
+ADDR_PRESENT_CURRENT  = 126
+TORQUE_ENABLE         = 1
+TORQUE_DISABLE        = 0
+POSITION_CONTROL_MODE = 3
 
 # 0–180° → 0–2047 Dynamixel ticks  (full 360° = 4095 ticks)
 TICKS_PER_DEGREE = 4095.0 / 360.0
@@ -71,6 +73,19 @@ class LegController(Node):
                 return False
 
             for mid in MOTOR_IDS:
+                # Torque must be off to change operating mode
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+
+                result, error = self.packet.write1ByteTxRx(
+                    self.port, mid, ADDR_OPERATING_MODE, POSITION_CONTROL_MODE)
+                if result != COMM_SUCCESS or error != 0:
+                    self.get_logger().warn(
+                        f'Operating mode set failed for leg motor {mid} '
+                        f'({self.packet.getTxRxResult(result)} | '
+                        f'{self.packet.getRxPacketError(error)}) '
+                        '— running in SIMULATION mode')
+                    return False
+
                 result, error = self.packet.write1ByteTxRx(
                     self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
                 if result != COMM_SUCCESS or error != 0:
@@ -81,7 +96,7 @@ class LegController(Node):
                         '— running in SIMULATION mode')
                     return False
 
-            self.get_logger().info(f'Leg motors ready on {PORT}')
+            self.get_logger().info(f'Leg motors ready on {PORT} (position control mode)')
             return True
         except Exception as e:
             self.get_logger().warn(
@@ -120,13 +135,19 @@ class LegController(Node):
         self.get_logger().info('Motor reset: reconnecting leg motors')
         all_ok = True
         for mid in MOTOR_IDS:
+            self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+            result, error = self.packet.write1ByteTxRx(
+                self.port, mid, ADDR_OPERATING_MODE, POSITION_CONTROL_MODE)
+            if result != COMM_SUCCESS or error != 0:
+                all_ok = False
+                continue
             result, error = self.packet.write1ByteTxRx(
                 self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
             if result != COMM_SUCCESS or error != 0:
                 all_ok = False
         if all_ok:
             self._ready = True
-            self.get_logger().info('Leg motors reconnected')
+            self.get_logger().info('Leg motors reconnected (position control mode)')
         else:
             self.get_logger().warn('Re-enable failed — retrying full init')
             try:
