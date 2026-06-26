@@ -89,7 +89,10 @@ class TeleopSender:
         self._state_lock = threading.Lock()
         self._last_recv  = 0.0
 
-        self.speed_pct = 20
+        self.speed_pct  = 20
+        self.drive_mode = 0      # 0 = torque/current, 1 = velocity
+        self.overcharge = False
+        self._ocharge_mouse_down = False
 
         # UDP sockets
         self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -125,9 +128,11 @@ class TeleopSender:
         self._kb_paddles = {'l4': False, 'l5': False, 'r4': False, 'r5': False}
 
         # Clickable rects (populated each frame)
-        self._estop_rect = pygame.Rect(0, 0, 0, 0)
-        self._reset_rect = pygame.Rect(0, 0, 0, 0)
-        self._spd_track  = pygame.Rect(0, 0, 0, 0)
+        self._estop_rect  = pygame.Rect(0, 0, 0, 0)
+        self._reset_rect  = pygame.Rect(0, 0, 0, 0)
+        self._spd_track   = pygame.Rect(0, 0, 0, 0)
+        self._mode_rect   = pygame.Rect(0, 0, 0, 0)
+        self._ocharge_rect = pygame.Rect(0, 0, 0, 0)
 
         # Motor reset flash state
         self._reset_flash = 0.0
@@ -152,7 +157,8 @@ class TeleopSender:
                 pass
 
     def _send_ctrl(self):
-        msg = {'type': 'ctrl', 'speed_pct': self.speed_pct}
+        msg = {'type': 'ctrl', 'speed_pct': self.speed_pct,
+               'drive_mode': self.drive_mode, 'overcharge': self.overcharge}
         msg.update(self.ctrl)
         try:
             self._ctrl_sock.sendto(json.dumps(msg).encode(),
@@ -169,6 +175,8 @@ class TeleopSender:
 
     def do_estop(self):
         self._send_special('estop')
+        self.overcharge = False
+        self._ocharge_mouse_down = False
         self.ctrl.update(lx=0.0, ly=0.0, ry=0.0,
                          l2=False, l1=False, r1=False,
                          l4=False, l5=False, r4=False, r5=False,
@@ -316,6 +324,13 @@ class TeleopSender:
                     self.do_estop()
                 elif ev.key == pygame.K_r:
                     self.do_motor_reset()
+                elif ev.key == pygame.K_t:
+                    self.drive_mode = 1 - self.drive_mode
+                    if self.drive_mode == 1:
+                        self.overcharge = False
+                elif ev.key == pygame.K_o:
+                    if self.drive_mode == 0:
+                        self.overcharge = True
                 elif ev.key == pygame.K_v:
                     self._kb_paddles['l4'] = True
                 elif ev.key == pygame.K_b:
@@ -326,7 +341,9 @@ class TeleopSender:
                     self._kb_paddles['r5'] = True
 
             elif ev.type == pygame.KEYUP:
-                if ev.key == pygame.K_v:
+                if ev.key == pygame.K_o:
+                    self.overcharge = False
+                elif ev.key == pygame.K_v:
                     self._kb_paddles['l4'] = False
                 elif ev.key == pygame.K_b:
                     self._kb_paddles['l5'] = False
@@ -341,6 +358,13 @@ class TeleopSender:
                     self.do_estop()
                 elif self._reset_rect.collidepoint(p):
                     self.do_motor_reset()
+                elif self._mode_rect.collidepoint(p):
+                    self.drive_mode = 1 - self.drive_mode
+                    if self.drive_mode == 1:
+                        self.overcharge = False
+                elif self._ocharge_rect.collidepoint(p) and self.drive_mode == 0:
+                    self._ocharge_mouse_down = True
+                    self.overcharge = True
                 elif self._spd_track.collidepoint(p):
                     self._speed_dragging = True
                     self._set_speed_from_x(p[0])
@@ -348,9 +372,15 @@ class TeleopSender:
             elif ev.type == pygame.MOUSEMOTION:
                 if self._speed_dragging:
                     self._set_speed_from_x(ev.pos[0])
+                if self._ocharge_mouse_down and not self._ocharge_rect.collidepoint(ev.pos):
+                    self._ocharge_mouse_down = False
+                    self.overcharge = False
 
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 self._speed_dragging = False
+                if self._ocharge_mouse_down:
+                    self._ocharge_mouse_down = False
+                    self.overcharge = False
 
     def _set_speed_from_x(self, mx: int):
         r = self._spd_track
@@ -418,8 +448,9 @@ class TeleopSender:
         mid_y = y + BAR_H // 2
         cx = 12
 
-        # Torque limit label
-        lbl = self.font_sm.render('TORQUE %', True, CYAN)
+        # Speed label (mode-aware)
+        bar_lbl = 'SPEED %' if self.drive_mode == 1 else 'TORQUE %'
+        lbl = self.font_sm.render(bar_lbl, True, CYAN)
         self._blit_center_y(lbl, cx, mid_y)
         cx += lbl.get_width() + 10
 
@@ -443,31 +474,72 @@ class TeleopSender:
         host_s = self.font_sm.render(f'HOST: {self.host}:{self.ctrl_port}', True, GRAY)
         self._blit_center_y(host_s, cx, mid_y)
 
-        BW, BH = 140, 30
-        mr_y = mid_y - BH // 2
+        BH  = 30
+        GAP = 8
+        btn_y = mid_y - BH // 2
 
-        # Motor Reset button
-        mr_x = W - BW * 2 - 30
-        mr_rect = pygame.Rect(mr_x, mr_y, BW, BH)
-        flash = self._reset_flash > 0
-        mr_bg  = CYAN_DIM if flash else DARK
-        mr_fg  = CYAN     if flash else CYAN_DIM
-        pygame.draw.rect(self.screen, mr_bg, mr_rect, border_radius=4)
-        pygame.draw.rect(self.screen, mr_fg, mr_rect, 1, border_radius=4)
-        mr_s = self.font_sm.render('⟳ MOTOR RESET  [R]', True, CYAN if flash else GRAY)
-        self.screen.blit(mr_s, (mr_x + BW // 2 - mr_s.get_width() // 2,
-                                 mr_y + BH // 2 - mr_s.get_height() // 2))
-        self._reset_rect = mr_rect
-
-        # E-STOP button
-        es_x = W - BW - 10
-        es_rect = pygame.Rect(es_x, mr_y, BW, BH)
+        # E-STOP (far right)
+        BW_ES = 140
+        es_x = W - BW_ES - 8
+        es_rect = pygame.Rect(es_x, btn_y, BW_ES, BH)
         pygame.draw.rect(self.screen, (42, 0, 16), es_rect, border_radius=4)
         pygame.draw.rect(self.screen, RED_DIM, es_rect, 2, border_radius=4)
         es_s = self.font_sm.render('⚠ E-STOP  [E]', True, RED)
-        self.screen.blit(es_s, (es_x + BW // 2 - es_s.get_width() // 2,
-                                 mr_y + BH // 2 - es_s.get_height() // 2))
+        self.screen.blit(es_s, (es_x + BW_ES // 2 - es_s.get_width() // 2,
+                                 btn_y + BH // 2 - es_s.get_height() // 2))
         self._estop_rect = es_rect
+
+        # Motor Reset
+        BW_MR = 140
+        mr_x = es_x - BW_MR - GAP
+        mr_rect = pygame.Rect(mr_x, btn_y, BW_MR, BH)
+        flash = self._reset_flash > 0
+        mr_bg = CYAN_DIM if flash else DARK
+        mr_fg = CYAN     if flash else CYAN_DIM
+        pygame.draw.rect(self.screen, mr_bg, mr_rect, border_radius=4)
+        pygame.draw.rect(self.screen, mr_fg, mr_rect, 1, border_radius=4)
+        mr_s = self.font_sm.render('⟳ MOTOR RESET  [R]', True, CYAN if flash else GRAY)
+        self.screen.blit(mr_s, (mr_x + BW_MR // 2 - mr_s.get_width() // 2,
+                                 btn_y + BH // 2 - mr_s.get_height() // 2))
+        self._reset_rect = mr_rect
+
+        # Overcharge (hold, torque mode only)
+        BW_OC = 120
+        oc_x = mr_x - BW_OC - GAP
+        oc_rect = pygame.Rect(oc_x, btn_y, BW_OC, BH)
+        pulse = int(time.monotonic() * 5) % 2 == 0
+        if self.overcharge:
+            oc_bg  = (100, 40, 0) if pulse else (70, 25, 0)
+            oc_fg  = ORANGE       if pulse else (200, 130, 0)
+            oc_col = ORANGE
+        elif self.drive_mode == 1:
+            oc_bg, oc_fg, oc_col = DARK, (40, 20, 10), (80, 40, 20)
+        else:
+            oc_bg, oc_fg, oc_col = DARK, RED_DIM, RED
+        pygame.draw.rect(self.screen, oc_bg, oc_rect, border_radius=4)
+        pygame.draw.rect(self.screen, oc_fg, oc_rect, 2 if self.overcharge else 1,
+                         border_radius=4)
+        oc_s = self.font_sm.render('⚠ OVERCHARGE [O]', True, oc_col)
+        self.screen.blit(oc_s, (oc_x + BW_OC // 2 - oc_s.get_width() // 2,
+                                 btn_y + BH // 2 - oc_s.get_height() // 2))
+        self._ocharge_rect = oc_rect
+
+        # Mode toggle
+        BW_MD = 110
+        md_x = oc_x - BW_MD - GAP
+        md_rect = pygame.Rect(md_x, btn_y, BW_MD, BH)
+        if self.drive_mode == 0:
+            md_bg, md_fg, md_col = DARK, PURPLE_DIM, PURPLE
+            md_txt = '⚡ TORQUE [T]'
+        else:
+            md_bg, md_fg, md_col = (0, 30, 20), GREEN_DIM, GREEN
+            md_txt = '◎ VELOCITY [T]'
+        pygame.draw.rect(self.screen, md_bg, md_rect, border_radius=4)
+        pygame.draw.rect(self.screen, md_fg, md_rect, 1, border_radius=4)
+        md_s = self.font_sm.render(md_txt, True, md_col)
+        self.screen.blit(md_s, (md_x + BW_MD // 2 - md_s.get_width() // 2,
+                                 btn_y + BH // 2 - md_s.get_height() // 2))
+        self._mode_rect = md_rect
 
         return y + BAR_H
 
@@ -531,9 +603,10 @@ class TeleopSender:
         js_r  = 52
         js_cx = x + w // 2
         js_cy = cy + js_r + 14
+        rs_lbl = 'RIGHT STICK  —  SPEED LIMIT' if self.drive_mode == 1 else 'RIGHT STICK  —  TORQUE LIMIT'
         self._draw_joystick(js_cx, js_cy, js_r,
                             0, self.ctrl['ry'],
-                            GREEN, 'RIGHT STICK  —  TORQUE LIMIT',
+                            GREEN, rs_lbl,
                             y_only=True)
         cy = js_cy + js_r + 20
 
@@ -587,8 +660,9 @@ class TeleopSender:
 
         cy = y + 6
 
-        # Commanded torque
-        cy = self._section_hdr('WHEEL TORQUE CMD', x, cy, w)
+        # Commanded wheel output
+        mode_hdr = 'WHEEL VEL CMD' if self.drive_mode == 1 else 'WHEEL TORQUE CMD'
+        cy = self._section_hdr(mode_hdr, x, cy, w)
         cy += 4
         cy = self._draw_4cell_row(x, cy, w, 38,
                                   ['FL', 'FR', 'BL', 'BR'], [wt[0], wt[2], wt[1], wt[3]],

@@ -41,6 +41,8 @@ class TeleopReceiver(Node):
         self.leg_currents   = [0, 0, 0, 0]
         self.speed_pct      = 20
         self.wheel_max      = 50
+        self.drive_mode     = 0    # 0 = torque/current, 1 = velocity
+        self.overcharge     = False
         self.lock           = threading.Lock()
 
         self._sender_addr = None
@@ -104,6 +106,13 @@ class TeleopReceiver(Node):
         with self.lock:
             angles    = list(self.leg_angles)
             speed_pct = self.speed_pct
+
+        if 'drive_mode' in ctrl:
+            with self.lock:
+                self.drive_mode = max(0, min(1, int(ctrl['drive_mode'])))
+        if 'overcharge' in ctrl:
+            with self.lock:
+                self.overcharge = bool(ctrl['overcharge'])
 
         if ctrl.get('speed_pct') is not None:
             speed_pct = max(0, min(100, int(ctrl['speed_pct'])))
@@ -177,6 +186,7 @@ class TeleopReceiver(Node):
         with self.lock:
             self.wheel_cmd  = [0, 0, 0, 0]
             self.leg_angles = [0, 0, 0, 0]
+            self.overcharge = False
         zero = Int32MultiArray()
         zero.data = [0] * 8
         self.pub.publish(zero)
@@ -208,7 +218,8 @@ class TeleopReceiver(Node):
         while rclpy.ok():
             msg = Int32MultiArray()
             with self.lock:
-                msg.data = list(self.wheel_cmd) + list(self.leg_angles)
+                msg.data = (list(self.wheel_cmd) + list(self.leg_angles) +
+                            [self.drive_mode, int(self.overcharge)])
             self.pub.publish(msg)
             time.sleep(dt)
 
@@ -225,6 +236,7 @@ class TeleopReceiver(Node):
                         'wheel_currents': list(self.wheel_currents),
                         'leg_currents':   list(self.leg_currents),
                         'speed_pct':      self.speed_pct,
+                        'drive_mode':     self.drive_mode,
                     }).encode()
                 try:
                     self._state_sock.sendto(payload, addr)
