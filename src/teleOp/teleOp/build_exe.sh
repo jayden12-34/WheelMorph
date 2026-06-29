@@ -29,7 +29,7 @@ PYTHON="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
 echo "Installing dependencies..."
-"$PIP" install --quiet pygame pyinstaller
+"$PIP" install --quiet pygame opencv-python numpy pyinstaller
 
 echo "Building executable..."
 "$VENV/bin/pyinstaller" \
@@ -38,6 +38,7 @@ echo "Building executable..."
     --distpath "$OUT_DIR" \
     --workpath "$SCRIPT_DIR/.pyibuild" \
     --specpath "$SCRIPT_DIR/.pyibuild" \
+    --collect-all cv2 \
     --clean \
     --noconfirm \
     "$SCRIPT_DIR/pygame_sender.py"
