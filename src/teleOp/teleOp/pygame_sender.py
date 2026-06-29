@@ -9,6 +9,7 @@ Usage:
 import argparse
 import json
 import math
+import os
 import socket
 import sys
 import threading
@@ -743,8 +744,12 @@ class TeleopSender:
             self.screen.blit(scaled, rect.topleft)
             pygame.draw.rect(self.screen, CYAN_DIM, rect, 1, border_radius=4)
         else:
-            msg = 'NO CAMERA SIGNAL' if _CV2_AVAILABLE else 'cv2 NOT INSTALLED'
-            sub = f'/dev/video{CAM_INDEX}' if _CV2_AVAILABLE else 'pip install opencv-python'
+            if not _CV2_AVAILABLE:
+                msg, sub = 'cv2 NOT INSTALLED', 'pip install opencv-python'
+            elif not os.path.exists(f'/dev/video{CAM_INDEX}'):
+                msg, sub = 'NO DEVICE NODE', f'/dev/video{CAM_INDEX} not found — check USB 3.0'
+            else:
+                msg, sub = 'CAMERA NOT OPENING', f'/dev/video{CAM_INDEX} exists but unreadable'
             ms = self.font_lg.render(msg, True, RED_DIM)
             ss = self.font_sm.render(sub, True, GRAY)
             self.screen.blit(ms, (rect.centerx - ms.get_width() // 2,
