@@ -15,9 +15,16 @@ import threading
 import time
 
 import pygame
+try:
+    import cv2
+    import numpy as np
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
 
 CTRL_PORT  = 7700
 STATE_PORT = 7701
+CAM_INDEX  = 0   # ZED-M left eye at /dev/video0 once ZED SDK is installed
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 BG         = (10,  26,  53)
@@ -91,8 +98,6 @@ class TeleopSender:
 
         self.speed_pct  = 20
         self.drive_mode = 0      # 0 = torque/current, 1 = velocity
-        self.overcharge = False
-        self._ocharge_mouse_down = False
 
         # UDP sockets
         self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -128,17 +133,24 @@ class TeleopSender:
         self._kb_paddles = {'l4': False, 'l5': False, 'r4': False, 'r5': False}
 
         # Clickable rects (populated each frame)
-        self._estop_rect  = pygame.Rect(0, 0, 0, 0)
-        self._reset_rect  = pygame.Rect(0, 0, 0, 0)
-        self._spd_track   = pygame.Rect(0, 0, 0, 0)
-        self._mode_rect   = pygame.Rect(0, 0, 0, 0)
-        self._ocharge_rect = pygame.Rect(0, 0, 0, 0)
+        self._estop_rect = pygame.Rect(0, 0, 0, 0)
+        self._reset_rect = pygame.Rect(0, 0, 0, 0)
+        self._spd_track  = pygame.Rect(0, 0, 0, 0)
+        self._mode_rect  = pygame.Rect(0, 0, 0, 0)
 
         # Motor reset flash state
         self._reset_flash = 0.0
 
         self._smooth_lx = 0.0
         self._smooth_ly = 0.0
+
+        # Camera feed
+        self._cam_view      = False
+        self._cam_frame     = None   # latest pygame Surface from capture thread
+        self._cam_lock      = threading.Lock()
+        self._cam_connected = False
+        if _CV2_AVAILABLE:
+            threading.Thread(target=self._cam_loop, daemon=True).start()
 
     # ── Networking ───────────────────────────────────────────────────────────
 
@@ -158,7 +170,7 @@ class TeleopSender:
 
     def _send_ctrl(self):
         msg = {'type': 'ctrl', 'speed_pct': self.speed_pct,
-               'drive_mode': self.drive_mode, 'overcharge': self.overcharge}
+               'drive_mode': self.drive_mode}
         msg.update(self.ctrl)
         try:
             self._ctrl_sock.sendto(json.dumps(msg).encode(),
@@ -175,8 +187,6 @@ class TeleopSender:
 
     def do_estop(self):
         self._send_special('estop')
-        self.overcharge = False
-        self._ocharge_mouse_down = False
         self.ctrl.update(lx=0.0, ly=0.0, ry=0.0,
                          l2=False, l1=False, r1=False,
                          l4=False, l5=False, r4=False, r5=False,
@@ -326,11 +336,8 @@ class TeleopSender:
                     self.do_motor_reset()
                 elif ev.key == pygame.K_t:
                     self.drive_mode = 1 - self.drive_mode
-                    if self.drive_mode == 1:
-                        self.overcharge = False
-                elif ev.key == pygame.K_o:
-                    if self.drive_mode == 0:
-                        self.overcharge = True
+                elif ev.key == pygame.K_c:
+                    self._cam_view = not self._cam_view
                 elif ev.key == pygame.K_v:
                     self._kb_paddles['l4'] = True
                 elif ev.key == pygame.K_b:
@@ -341,9 +348,7 @@ class TeleopSender:
                     self._kb_paddles['r5'] = True
 
             elif ev.type == pygame.KEYUP:
-                if ev.key == pygame.K_o:
-                    self.overcharge = False
-                elif ev.key == pygame.K_v:
+                if ev.key == pygame.K_v:
                     self._kb_paddles['l4'] = False
                 elif ev.key == pygame.K_b:
                     self._kb_paddles['l5'] = False
@@ -360,11 +365,6 @@ class TeleopSender:
                     self.do_motor_reset()
                 elif self._mode_rect.collidepoint(p):
                     self.drive_mode = 1 - self.drive_mode
-                    if self.drive_mode == 1:
-                        self.overcharge = False
-                elif self._ocharge_rect.collidepoint(p) and self.drive_mode == 0:
-                    self._ocharge_mouse_down = True
-                    self.overcharge = True
                 elif self._spd_track.collidepoint(p):
                     self._speed_dragging = True
                     self._set_speed_from_x(p[0])
@@ -372,15 +372,9 @@ class TeleopSender:
             elif ev.type == pygame.MOUSEMOTION:
                 if self._speed_dragging:
                     self._set_speed_from_x(ev.pos[0])
-                if self._ocharge_mouse_down and not self._ocharge_rect.collidepoint(ev.pos):
-                    self._ocharge_mouse_down = False
-                    self.overcharge = False
 
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 self._speed_dragging = False
-                if self._ocharge_mouse_down:
-                    self._ocharge_mouse_down = False
-                    self.overcharge = False
 
     def _set_speed_from_x(self, mx: int):
         r = self._spd_track
@@ -406,6 +400,36 @@ class TeleopSender:
         except Exception:
             pass
         pygame.quit()
+
+    # ── Camera capture ────────────────────────────────────────────────────────
+
+    def _cam_loop(self):
+        cap = None
+        while self.running:
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture(CAM_INDEX)
+                if not cap.isOpened():
+                    self._cam_connected = False
+                    time.sleep(1.0)
+                    continue
+                self._cam_connected = True
+
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                cap = None
+                self._cam_connected = False
+                with self._cam_lock:
+                    self._cam_frame = None
+                continue
+
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+            with self._cam_lock:
+                self._cam_frame = surf
+
+        if cap and cap.isOpened():
+            cap.release()
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 
@@ -503,30 +527,9 @@ class TeleopSender:
                                  btn_y + BH // 2 - mr_s.get_height() // 2))
         self._reset_rect = mr_rect
 
-        # Overcharge (hold, torque mode only)
-        BW_OC = 120
-        oc_x = mr_x - BW_OC - GAP
-        oc_rect = pygame.Rect(oc_x, btn_y, BW_OC, BH)
-        pulse = int(time.monotonic() * 5) % 2 == 0
-        if self.overcharge:
-            oc_bg  = (100, 40, 0) if pulse else (70, 25, 0)
-            oc_fg  = ORANGE       if pulse else (200, 130, 0)
-            oc_col = ORANGE
-        elif self.drive_mode == 1:
-            oc_bg, oc_fg, oc_col = DARK, (40, 20, 10), (80, 40, 20)
-        else:
-            oc_bg, oc_fg, oc_col = DARK, RED_DIM, RED
-        pygame.draw.rect(self.screen, oc_bg, oc_rect, border_radius=4)
-        pygame.draw.rect(self.screen, oc_fg, oc_rect, 2 if self.overcharge else 1,
-                         border_radius=4)
-        oc_s = self.font_sm.render('⚠ OVERCHARGE [O]', True, oc_col)
-        self.screen.blit(oc_s, (oc_x + BW_OC // 2 - oc_s.get_width() // 2,
-                                 btn_y + BH // 2 - oc_s.get_height() // 2))
-        self._ocharge_rect = oc_rect
-
         # Mode toggle
         BW_MD = 110
-        md_x = oc_x - BW_MD - GAP
+        md_x = mr_x - BW_MD - GAP
         md_rect = pygame.Rect(md_x, btn_y, BW_MD, BH)
         if self.drive_mode == 0:
             md_bg, md_fg, md_col = DARK, PURPLE_DIM, PURPLE
@@ -679,12 +682,16 @@ class TeleopSender:
                                   lambda v: f'{v}°', PURPLE_DIM)
         cy += 4
 
-        # Robot diagram
-        cy = self._section_hdr('ROBOT DIAGRAM', x, cy, w)
+        # Robot diagram / camera feed (toggle with [C])
+        cam_hdr = 'CAMERA FEED [C]' if self._cam_view else 'ROBOT DIAGRAM [C]'
+        cy = self._section_hdr(cam_hdr, x, cy, w)
         remaining = h - (cy - y) - 100
         diag_h    = max(80, remaining)
         diag_rect = pygame.Rect(x + 4, cy, w - 8, diag_h)
-        self._draw_robot_diagram(diag_rect, wt, wc)
+        if self._cam_view:
+            self._draw_camera(diag_rect)
+        else:
+            self._draw_robot_diagram(diag_rect, wt, wc)
         cy += diag_h + 6
 
         # Current draw — commanded vs actual side by side
@@ -723,6 +730,27 @@ class TeleopSender:
         tot_col = RED if total > 5000 else (CYAN if total > 500 else WHITE)
         tot_s = self.font_med.render(tot_txt, True, tot_col)
         self.screen.blit(tot_s, (x + w // 2 - tot_s.get_width() // 2, cy))
+
+    def _draw_camera(self, rect: pygame.Rect):
+        pygame.draw.rect(self.screen, DARK, rect, border_radius=4)
+        pygame.draw.rect(self.screen, CYAN_DIM, rect, 1, border_radius=4)
+
+        with self._cam_lock:
+            frame = self._cam_frame
+
+        if frame is not None:
+            scaled = pygame.transform.scale(frame, (rect.width, rect.height))
+            self.screen.blit(scaled, rect.topleft)
+            pygame.draw.rect(self.screen, CYAN_DIM, rect, 1, border_radius=4)
+        else:
+            msg = 'NO CAMERA SIGNAL' if _CV2_AVAILABLE else 'cv2 NOT INSTALLED'
+            sub = f'/dev/video{CAM_INDEX}' if _CV2_AVAILABLE else 'pip install opencv-python'
+            ms = self.font_lg.render(msg, True, RED_DIM)
+            ss = self.font_sm.render(sub, True, GRAY)
+            self.screen.blit(ms, (rect.centerx - ms.get_width() // 2,
+                                   rect.centery - ms.get_height()))
+            self.screen.blit(ss, (rect.centerx - ss.get_width() // 2,
+                                   rect.centery + 4))
 
     def _draw_robot_diagram(self, rect: pygame.Rect, torques: list, currents: list):
         pygame.draw.rect(self.screen, DARK, rect, border_radius=4)

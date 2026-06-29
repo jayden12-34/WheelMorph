@@ -23,10 +23,13 @@ TORQUE_DISABLE       = 0
 CURRENT_CONTROL_MODE = 0
 
 # Teleop sends -50..50; map to Dynamixel current units (2.69 mA/unit on XM/XH series)
-# Scale of 12 → max ±600 units ≈ ±1614 mA continuous on XM430-W350
-CURRENT_SCALE            = 12
-OVERCHARGE_CURRENT_UNITS = 743   # ≈ 2 A (743 units × 2.69 mA/unit)
-CURRENT_UNIT_MA          = 2.69
+# Scale of 15 → max ±750 units ≈ ±2017 mA at 100% torque on XM430-W350
+CURRENT_SCALE      = 15
+CURRENT_UNIT_MA    = 2.69
+
+# Current Limit register (EEPROM, addr 38) — write during init to clear any prior cap
+ADDR_CURRENT_LIMIT    = 38
+CURRENT_LIMIT_UNITS   = 800   # ≈ 2150 mA; headroom above the 750-unit drive max
 
 # Velocity control mode
 VELOCITY_CONTROL_MODE = 1
@@ -45,9 +48,11 @@ class WheelController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready      = self._initialize()
-        self._last_cmds  = [0] * len(MOTOR_IDS)
-        self._drive_mode = CURRENT_CONTROL_MODE
+        self._ready           = self._initialize()
+        self._last_cmds       = [0] * len(MOTOR_IDS)
+        self._drive_mode      = CURRENT_CONTROL_MODE
+        self._user_drive_mode = CURRENT_CONTROL_MODE
+        self._braking         = False
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
@@ -71,8 +76,12 @@ class WheelController(Node):
                 return False
 
             for mid in MOTOR_IDS:
-                # Torque must be disabled before changing operating mode
+                # Torque must be disabled before changing operating mode or EEPROM registers
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+
+                # Clear any previously-saved current cap (EEPROM) so we can reach 2 A
+                self.packet.write2ByteTxRx(
+                    self.port, mid, ADDR_CURRENT_LIMIT, CURRENT_LIMIT_UNITS)
 
                 result, error = self.packet.write1ByteTxRx(
                     self.port, mid, ADDR_OPERATING_MODE, CURRENT_CONTROL_MODE)
@@ -134,6 +143,7 @@ class WheelController(Node):
         if not msg.data:
             return
         self.get_logger().warn('EMERGENCY STOP received — disabling wheel motors')
+        self._braking = False
         if self._ready:
             for mid in MOTOR_IDS:
                 self._set_current(mid, 0)
@@ -147,9 +157,13 @@ class WheelController(Node):
         if not msg.data:
             return
         self.get_logger().info('Motor reset: reconnecting wheel motors')
+        self._braking         = False
+        self._user_drive_mode = CURRENT_CONTROL_MODE
+        self._drive_mode      = CURRENT_CONTROL_MODE
         all_ok = True
         for mid in MOTOR_IDS:
             self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+            self.packet.write2ByteTxRx(self.port, mid, ADDR_CURRENT_LIMIT, CURRENT_LIMIT_UNITS)
             result, error = self.packet.write1ByteTxRx(
                 self.port, mid, ADDR_OPERATING_MODE, CURRENT_CONTROL_MODE)
             if result != COMM_SUCCESS or error != 0:
@@ -176,29 +190,47 @@ class WheelController(Node):
             return
 
         wheel_cmds = list(msg.data[0:4])
-        new_mode   = int(msg.data[8]) if len(msg.data) > 8 else CURRENT_CONTROL_MODE
-        overcharge = bool(msg.data[9]) if len(msg.data) > 9 else False
+        user_mode  = int(msg.data[8]) if len(msg.data) > 8 else CURRENT_CONTROL_MODE
 
-        if new_mode != self._drive_mode:
-            self._switch_mode(new_mode)
+        # Handle user-requested drive mode change
+        if user_mode != self._user_drive_mode:
+            self._user_drive_mode = user_mode
+            self._braking = False
+            if self._drive_mode != user_mode:
+                self._switch_mode(user_mode)
 
-        if self._ready:
-            if self._drive_mode == CURRENT_CONTROL_MODE:
-                for i, cmd in enumerate(wheel_cmds):
-                    self._last_cmds[i] = cmd
-                    if overcharge and cmd != 0:
-                        sign = 1 if cmd > 0 else -1
-                        self._set_current(MOTOR_IDS[i], sign * OVERCHARGE_CURRENT_UNITS)
-                    else:
-                        self._set_current(MOTOR_IDS[i], cmd * CURRENT_SCALE)
+        all_zero = all(c == 0 for c in wheel_cmds)
+
+        if self._user_drive_mode == CURRENT_CONTROL_MODE:
+            # Auto-brake: switch to velocity mode with goal=0 when controls released
+            if all_zero:
+                if not self._braking:
+                    self._braking = True
+                    if self._drive_mode != VELOCITY_CONTROL_MODE:
+                        self._switch_mode(VELOCITY_CONTROL_MODE)
+                if self._ready:
+                    for mid in MOTOR_IDS:
+                        self._set_velocity(mid, 0)
             else:
+                if self._braking:
+                    self._braking = False
+                    if self._drive_mode != CURRENT_CONTROL_MODE:
+                        self._switch_mode(CURRENT_CONTROL_MODE)
+                if self._ready:
+                    for i, cmd in enumerate(wheel_cmds):
+                        self._last_cmds[i] = cmd
+                        self._set_current(MOTOR_IDS[i], cmd * CURRENT_SCALE)
+        else:
+            # User velocity mode — no auto-braking
+            if self._ready:
                 for i, cmd in enumerate(wheel_cmds):
                     self._last_cmds[i] = cmd
                     self._set_velocity(MOTOR_IDS[i], cmd * VELOCITY_SCALE)
-        else:
+
+        if not self._ready:
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
-                if self._drive_mode == CURRENT_CONTROL_MODE:
+                if self._user_drive_mode == CURRENT_CONTROL_MODE and not all_zero:
                     dxl_vals = [
                         -(c * CURRENT_SCALE) if i in REVERSED_MOTORS
                         else c * CURRENT_SCALE
@@ -206,9 +238,8 @@ class WheelController(Node):
                     ]
                     self.get_logger().info(
                         f'[SIM] wheel_cmds={wheel_cmds}  '
-                        f'→ dynamixel_current_units={dxl_vals}'
-                        + (' [OVERCHARGE]' if overcharge else ''))
-                else:
+                        f'→ dynamixel_current_units={dxl_vals}')
+                elif self._user_drive_mode == VELOCITY_CONTROL_MODE:
                     dxl_vals = [
                         -(c * VELOCITY_SCALE) if i in REVERSED_MOTORS
                         else c * VELOCITY_SCALE

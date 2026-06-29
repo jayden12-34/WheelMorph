@@ -13,9 +13,8 @@ STATE_PORT = 7701
 SD_DEADZONE    = 0.12
 SD_LEG_STEP    = 30    # doubled step size
 
-FRONT_TRACK_CM = 23.0
-BACK_TRACK_CM  = 37.0
-_TRACK_AVG     = (FRONT_TRACK_CM + BACK_TRACK_CM) / 2.0  # 30.0
+TRACK_CM     = 24.5   # left-right wheel spacing (mm → cm)
+WHEELBASE_CM = 33.0   # front-back wheel spacing (not used in mixing)
 
 
 class TeleopReceiver(Node):
@@ -42,7 +41,6 @@ class TeleopReceiver(Node):
         self.speed_pct      = 20
         self.wheel_max      = 50
         self.drive_mode     = 0    # 0 = torque/current, 1 = velocity
-        self.overcharge     = False
         self.lock           = threading.Lock()
 
         self._sender_addr = None
@@ -110,9 +108,6 @@ class TeleopReceiver(Node):
         if 'drive_mode' in ctrl:
             with self.lock:
                 self.drive_mode = max(0, min(1, int(ctrl['drive_mode'])))
-        if 'overcharge' in ctrl:
-            with self.lock:
-                self.overcharge = bool(ctrl['overcharge'])
 
         if ctrl.get('speed_pct') is not None:
             speed_pct = max(0, min(100, int(ctrl['speed_pct'])))
@@ -137,20 +132,18 @@ class TeleopReceiver(Node):
         else:
             speed_pct = int(throttle * 100)
 
-        effective  = speed_pct / 100.0 * self.wheel_max
-        forward    = -ly * effective
-        turn       =  lx * effective
-        front_turn = turn * (FRONT_TRACK_CM / _TRACK_AVG)
-        back_turn  = turn * (BACK_TRACK_CM  / _TRACK_AVG)
+        effective = speed_pct / 100.0 * self.wheel_max
+        forward   = -ly * effective
+        turn      =  lx * effective
 
         def clamp(v):
             return int(max(-self.wheel_max, min(self.wheel_max, v)))
 
         ws = [
-            clamp(forward + front_turn),  # FL
-            clamp(forward + back_turn),   # BL
-            clamp(forward - front_turn),  # FR
-            clamp(forward - back_turn),   # BR
+            clamp(forward + turn),  # FL
+            clamp(forward + turn),  # BL
+            clamp(forward - turn),  # FR
+            clamp(forward - turn),  # BR
         ]
 
         # dpad = retract individual legs  (left side)
@@ -186,7 +179,6 @@ class TeleopReceiver(Node):
         with self.lock:
             self.wheel_cmd  = [0, 0, 0, 0]
             self.leg_angles = [0, 0, 0, 0]
-            self.overcharge = False
         zero = Int32MultiArray()
         zero.data = [0] * 8
         self.pub.publish(zero)
@@ -219,7 +211,7 @@ class TeleopReceiver(Node):
             msg = Int32MultiArray()
             with self.lock:
                 msg.data = (list(self.wheel_cmd) + list(self.leg_angles) +
-                            [self.drive_mode, int(self.overcharge)])
+                            [self.drive_mode])
             self.pub.publish(msg)
             time.sleep(dt)
 
