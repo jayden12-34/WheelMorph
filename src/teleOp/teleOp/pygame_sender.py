@@ -9,7 +9,6 @@ Usage:
 import argparse
 import json
 import math
-import os
 import socket
 import sys
 import threading
@@ -25,7 +24,7 @@ except ImportError:
 
 CTRL_PORT  = 7700
 STATE_PORT = 7701
-CAM_INDEX  = 0   # ZED-M left eye at /dev/video0 once ZED SDK is installed
+CAM_PORT   = 7702   # UDP port for JPEG frames streamed from the Jetson
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 BG         = (10,  26,  53)
@@ -405,32 +404,36 @@ class TeleopSender:
     # ── Camera capture ────────────────────────────────────────────────────────
 
     def _cam_loop(self):
-        cap = None
-        while self.running:
-            if cap is None or not cap.isOpened():
-                cap = cv2.VideoCapture(CAM_INDEX)
-                if not cap.isOpened():
-                    self._cam_connected = False
-                    time.sleep(1.0)
-                    continue
-                self._cam_connected = True
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', CAM_PORT))
+        sock.settimeout(1.0)
 
-            ret, frame = cap.read()
-            if not ret:
-                cap.release()
-                cap = None
-                self._cam_connected = False
+        while self.running:
+            try:
+                data, _ = sock.recvfrom(65536)
+            except socket.timeout:
                 with self._cam_lock:
                     self._cam_frame = None
+                self._cam_connected = False
+                continue
+            except Exception:
                 continue
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
-            with self._cam_lock:
-                self._cam_frame = surf
+            try:
+                buf   = np.frombuffer(data, dtype=np.uint8)
+                frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+                with self._cam_lock:
+                    self._cam_frame  = surf
+                self._cam_connected  = True
+            except Exception:
+                pass
 
-        if cap and cap.isOpened():
-            cap.release()
+        sock.close()
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 
@@ -745,11 +748,9 @@ class TeleopSender:
             pygame.draw.rect(self.screen, CYAN_DIM, rect, 1, border_radius=4)
         else:
             if not _CV2_AVAILABLE:
-                msg, sub = 'cv2 NOT INSTALLED', 'pip install opencv-python'
-            elif not os.path.exists(f'/dev/video{CAM_INDEX}'):
-                msg, sub = 'NO DEVICE NODE', f'/dev/video{CAM_INDEX} not found — check USB 3.0'
+                msg, sub = 'cv2 NOT INSTALLED', 'pip install opencv-python numpy'
             else:
-                msg, sub = 'CAMERA NOT OPENING', f'/dev/video{CAM_INDEX} exists but unreadable'
+                msg, sub = 'NO VIDEO STREAM', f'waiting for Jetson on UDP:{CAM_PORT}'
             ms = self.font_lg.render(msg, True, RED_DIM)
             ss = self.font_sm.render(sub, True, GRAY)
             self.screen.blit(ms, (rect.centerx - ms.get_width() // 2,

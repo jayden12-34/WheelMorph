@@ -3,12 +3,23 @@ import socket
 import threading
 import time
 
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
 
 CTRL_PORT  = 7700
 STATE_PORT = 7701
+CAM_PORT   = 7702
+
+CAM_WIDTH   = 640
+CAM_HEIGHT  = 360
+CAM_QUALITY = 60   # JPEG quality — trades file size vs latency
 
 SD_DEADZONE    = 0.12
 SD_LEG_STEP    = 30    # doubled step size
@@ -53,12 +64,17 @@ class TeleopReceiver(Node):
 
         self._state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        threading.Thread(target=self._recv_loop,    daemon=True).start()
-        threading.Thread(target=self._publish_loop, daemon=True).start()
-        threading.Thread(target=self._state_loop,   daemon=True).start()
+        self._cam_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        threading.Thread(target=self._recv_loop,      daemon=True).start()
+        threading.Thread(target=self._publish_loop,   daemon=True).start()
+        threading.Thread(target=self._state_loop,     daemon=True).start()
+        if _CV2_AVAILABLE:
+            threading.Thread(target=self._cam_sender_loop, daemon=True).start()
 
         self.get_logger().info(
-            f'TeleopReceiver ready  ctrl=UDP:{ctrl_port}  state=UDP:{state_port}')
+            f'TeleopReceiver ready  ctrl=UDP:{ctrl_port}  state=UDP:{state_port}'
+            + (f'  cam=UDP:{CAM_PORT}' if _CV2_AVAILABLE else '  cam=disabled (cv2 missing)'))
 
     # ── ROS subscribers ─────────────────────────────────────────────────────
 
@@ -236,6 +252,45 @@ class TeleopReceiver(Node):
                     pass
             time.sleep(dt)
 
+    def _cam_sender_loop(self):
+        cap = None
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, CAM_QUALITY]
+
+        while rclpy.ok():
+            sender = self._sender_addr
+            if sender is None:
+                time.sleep(0.1)
+                continue
+
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    time.sleep(1.0)
+                    continue
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+                self.get_logger().info('Camera opened — streaming to sender')
+
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                cap = None
+                self.get_logger().warn('Camera read failed — retrying')
+                continue
+
+            ok, buf = cv2.imencode('.jpg', frame, encode_params)
+            if not ok:
+                continue
+
+            dest = (sender[0], CAM_PORT)
+            try:
+                self._cam_sock.sendto(buf.tobytes(), dest)
+            except Exception:
+                pass
+
+        if cap and cap.isOpened():
+            cap.release()
+
     def shutdown(self):
         self._emergency_stop()
         try:
@@ -244,6 +299,10 @@ class TeleopReceiver(Node):
             pass
         try:
             self._state_sock.close()
+        except Exception:
+            pass
+        try:
+            self._cam_sock.close()
         except Exception:
             pass
 
