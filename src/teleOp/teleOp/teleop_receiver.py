@@ -44,11 +44,13 @@ class TeleopReceiver(Node):
 
         self.create_subscription(Int32MultiArray, 'wheel_currents', self._wheel_cb, 10)
         self.create_subscription(Int32MultiArray, 'leg_currents',   self._leg_cb,   10)
+        self.create_subscription(Int32MultiArray, 'wheel_temps',    self._temps_cb, 10)
 
         self.wheel_cmd      = [0, 0, 0, 0]
         self.leg_angles     = [0, 0, 0, 0]
         self.wheel_currents = [0, 0, 0, 0]
         self.leg_currents   = [0, 0, 0, 0]
+        self.wheel_temps    = [0, 0, 0, 0]
         self.speed_pct      = 20
         self.wheel_max      = 50
         self.drive_mode     = 0    # 0 = torque/current, 1 = velocity
@@ -85,6 +87,10 @@ class TeleopReceiver(Node):
     def _leg_cb(self, msg):
         with self.lock:
             self.leg_currents = list(msg.data[:4])
+
+    def _temps_cb(self, msg):
+        with self.lock:
+            self.wheel_temps = list(msg.data[:4])
 
     # ── UDP receive loop ─────────────────────────────────────────────────────
 
@@ -181,10 +187,10 @@ class TeleopReceiver(Node):
         if ctrl.get('btn_a'): angles[3] = min(180, angles[3] + SD_LEG_STEP)
 
         paddle_spd = max(1, int(self.wheel_max * speed_pct / 100))
-        if ctrl.get('l4'): ws[0] = paddle_spd
-        if ctrl.get('l5'): ws[1] = paddle_spd
-        if ctrl.get('r4'): ws[2] = paddle_spd
-        if ctrl.get('r5'): ws[3] = paddle_spd
+        if ctrl.get('l4'): ws[1] = paddle_spd   # BL
+        if ctrl.get('l5'): ws[0] = paddle_spd   # FL
+        if ctrl.get('r4'): ws[2] = paddle_spd   # FR
+        if ctrl.get('r5'): ws[3] = paddle_spd   # BR
 
         with self.lock:
             self.wheel_cmd  = ws
@@ -243,6 +249,7 @@ class TeleopReceiver(Node):
                         'leg_angles':     list(self.leg_angles),
                         'wheel_currents': list(self.wheel_currents),
                         'leg_currents':   list(self.leg_currents),
+                        'wheel_temps':    list(self.wheel_temps),
                         'speed_pct':      self.speed_pct,
                         'drive_mode':     self.drive_mode,
                     }).encode()
@@ -253,8 +260,12 @@ class TeleopReceiver(Node):
             time.sleep(dt)
 
     def _cam_sender_loop(self):
+        import os
+        cv2.setLogLevel(0)  # silence OpenCV's own stderr warnings
+
         cap = None
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, CAM_QUALITY]
+        _warned_no_device = False
 
         while rclpy.ok():
             sender = self._sender_addr
@@ -263,12 +274,22 @@ class TeleopReceiver(Node):
                 continue
 
             if cap is None or not cap.isOpened():
-                cap = cv2.VideoCapture(0)
+                if not os.path.exists('/dev/video0'):
+                    if not _warned_no_device:
+                        self.get_logger().warn('Camera: /dev/video0 not found — waiting for USB 3.0 connection')
+                        _warned_no_device = True
+                    time.sleep(2.0)
+                    continue
+
+                _warned_no_device = False
+                cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
                 if not cap.isOpened():
                     time.sleep(1.0)
                     continue
+                cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+                time.sleep(0.5)   # let the V4L2 driver finish initialising
                 self.get_logger().info('Camera opened — streaming to sender')
 
             ret, frame = cap.read()

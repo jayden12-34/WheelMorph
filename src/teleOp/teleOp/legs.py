@@ -16,12 +16,17 @@ MOTOR_IDS = [0, 1, 2, 3]
 
 ADDR_OPERATING_MODE   = 11
 ADDR_TORQUE_ENABLE    = 64
+ADDR_GOAL_CURRENT     = 102
 ADDR_GOAL_POSITION    = 116
 ADDR_PRESENT_POSITION = 132
 ADDR_PRESENT_CURRENT  = 126
 TORQUE_ENABLE         = 1
 TORQUE_DISABLE        = 0
-POSITION_CONTROL_MODE = 3
+CURRENT_BASED_POSITION_CONTROL_MODE = 5
+
+# Goal Current in CBPCP mode — caps the PID controller's current draw (2.69 mA/unit)
+# 500 units ≈ 1345 mA: enough torque to move the legs without straining under load
+LEG_GOAL_CURRENT_UNITS = 500
 
 # 0–180° → 0–2047 Dynamixel ticks  (full 360° = 4095 ticks)
 TICKS_PER_DEGREE = 4095.0 / 360.0
@@ -77,7 +82,7 @@ class LegController(Node):
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
 
                 result, error = self.packet.write1ByteTxRx(
-                    self.port, mid, ADDR_OPERATING_MODE, POSITION_CONTROL_MODE)
+                    self.port, mid, ADDR_OPERATING_MODE, CURRENT_BASED_POSITION_CONTROL_MODE)
                 if result != COMM_SUCCESS or error != 0:
                     self.get_logger().warn(
                         f'Operating mode set failed for leg motor {mid} '
@@ -96,7 +101,10 @@ class LegController(Node):
                         '— running in SIMULATION mode')
                     return False
 
-            self.get_logger().info(f'Leg motors ready on {PORT} (position control mode)')
+                self.packet.write2ByteTxRx(
+                    self.port, mid, ADDR_GOAL_CURRENT, LEG_GOAL_CURRENT_UNITS)
+
+            self.get_logger().info(f'Leg motors ready on {PORT} (current-based position control mode)')
             return True
         except Exception as e:
             self.get_logger().warn(
@@ -137,7 +145,7 @@ class LegController(Node):
         for mid in MOTOR_IDS:
             self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
             result, error = self.packet.write1ByteTxRx(
-                self.port, mid, ADDR_OPERATING_MODE, POSITION_CONTROL_MODE)
+                self.port, mid, ADDR_OPERATING_MODE, CURRENT_BASED_POSITION_CONTROL_MODE)
             if result != COMM_SUCCESS or error != 0:
                 all_ok = False
                 continue
@@ -145,9 +153,12 @@ class LegController(Node):
                 self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
             if result != COMM_SUCCESS or error != 0:
                 all_ok = False
+                continue
+            self.packet.write2ByteTxRx(
+                self.port, mid, ADDR_GOAL_CURRENT, LEG_GOAL_CURRENT_UNITS)
         if all_ok:
             self._ready = True
-            self.get_logger().info('Leg motors reconnected (position control mode)')
+            self.get_logger().info('Leg motors reconnected (current-based position control mode)')
         else:
             self.get_logger().warn('Re-enable failed — retrying full init')
             try:

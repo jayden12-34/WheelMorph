@@ -3,6 +3,7 @@ import signal
 import sys
 import termios
 import threading
+import time
 import tty
 import rclpy
 from rclpy.node import Node
@@ -17,7 +18,8 @@ MOTOR_IDS = [1, 0, 2, 3]  # FL/BL physically swapped — motor 1 = FL, motor 0 =
 ADDR_OPERATING_MODE  = 11
 ADDR_TORQUE_ENABLE   = 64
 ADDR_GOAL_CURRENT    = 102
-ADDR_PRESENT_CURRENT = 126
+ADDR_PRESENT_CURRENT      = 126
+ADDR_PRESENT_TEMPERATURE  = 146
 TORQUE_ENABLE        = 1
 TORQUE_DISABLE       = 0
 CURRENT_CONTROL_MODE = 0
@@ -29,7 +31,7 @@ CURRENT_UNIT_MA    = 2.69
 
 # Current Limit register (EEPROM, addr 38) — write during init to clear any prior cap
 ADDR_CURRENT_LIMIT    = 38
-CURRENT_LIMIT_UNITS   = 800   # ≈ 2150 mA; headroom above the 750-unit drive max
+CURRENT_LIMIT_UNITS   = 750   # = CURRENT_SCALE × 50; caps velocity mode to the same max as torque mode
 
 # Velocity control mode
 VELOCITY_CONTROL_MODE = 1
@@ -52,7 +54,7 @@ class WheelController(Node):
         self._last_cmds       = [0] * len(MOTOR_IDS)
         self._drive_mode      = CURRENT_CONTROL_MODE
         self._user_drive_mode = CURRENT_CONTROL_MODE
-        self._braking         = False
+        self._torque_disabled = False
 
         self.subscription = self.create_subscription(
             Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
@@ -62,7 +64,9 @@ class WheelController(Node):
             Bool, 'motor_reset', self._motor_reset_callback, 10)
 
         self.currents_pub = self.create_publisher(Int32MultiArray, 'wheel_currents', 10)
+        self.temps_pub    = self.create_publisher(Int32MultiArray, 'wheel_temps',    10)
         self.create_timer(0.1, self._publish_currents)
+        self.create_timer(2.0, self._publish_temps)
 
     def _initialize(self):
         try:
@@ -80,8 +84,14 @@ class WheelController(Node):
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
 
                 # Clear any previously-saved current cap (EEPROM) so we can reach 2 A
-                self.packet.write2ByteTxRx(
+                cl_result, cl_error = self.packet.write2ByteTxRx(
                     self.port, mid, ADDR_CURRENT_LIMIT, CURRENT_LIMIT_UNITS)
+                if cl_result != COMM_SUCCESS or cl_error != 0:
+                    self.get_logger().warn(
+                        f'Current Limit write failed for motor {mid} '
+                        f'({self.packet.getTxRxResult(cl_result)} | '
+                        f'{self.packet.getRxPacketError(cl_error)})')
+                time.sleep(0.05)  # EEPROM writes need ~50 ms to settle before next write
 
                 result, error = self.packet.write1ByteTxRx(
                     self.port, mid, ADDR_OPERATING_MODE, CURRENT_CONTROL_MODE)
@@ -135,7 +145,8 @@ class WheelController(Node):
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_OPERATING_MODE, new_mode)
                 self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
-        self._drive_mode = new_mode
+        self._drive_mode      = new_mode
+        self._torque_disabled = False
         mode_name = 'VELOCITY' if new_mode == VELOCITY_CONTROL_MODE else 'TORQUE/CURRENT'
         self.get_logger().info(f'Wheel drive mode → {mode_name}')
 
@@ -143,7 +154,6 @@ class WheelController(Node):
         if not msg.data:
             return
         self.get_logger().warn('EMERGENCY STOP received — disabling wheel motors')
-        self._braking = False
         if self._ready:
             for mid in MOTOR_IDS:
                 self._set_current(mid, 0)
@@ -157,13 +167,20 @@ class WheelController(Node):
         if not msg.data:
             return
         self.get_logger().info('Motor reset: reconnecting wheel motors')
-        self._braking         = False
-        self._user_drive_mode = CURRENT_CONTROL_MODE
+        self._user_drive_mode  = CURRENT_CONTROL_MODE
+        self._torque_disabled  = False
         self._drive_mode      = CURRENT_CONTROL_MODE
         all_ok = True
         for mid in MOTOR_IDS:
             self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
-            self.packet.write2ByteTxRx(self.port, mid, ADDR_CURRENT_LIMIT, CURRENT_LIMIT_UNITS)
+            cl_result, cl_error = self.packet.write2ByteTxRx(
+                self.port, mid, ADDR_CURRENT_LIMIT, CURRENT_LIMIT_UNITS)
+            if cl_result != COMM_SUCCESS or cl_error != 0:
+                self.get_logger().warn(
+                    f'Current Limit write failed for motor {mid} '
+                    f'({self.packet.getTxRxResult(cl_result)} | '
+                    f'{self.packet.getRxPacketError(cl_error)})')
+            time.sleep(0.05)  # EEPROM writes need ~50 ms to settle before next write
             result, error = self.packet.write1ByteTxRx(
                 self.port, mid, ADDR_OPERATING_MODE, CURRENT_CONTROL_MODE)
             if result != COMM_SUCCESS or error != 0:
@@ -195,27 +212,26 @@ class WheelController(Node):
         # Handle user-requested drive mode change
         if user_mode != self._user_drive_mode:
             self._user_drive_mode = user_mode
-            self._braking = False
             if self._drive_mode != user_mode:
                 self._switch_mode(user_mode)
 
         all_zero = all(c == 0 for c in wheel_cmds)
 
         if self._user_drive_mode == CURRENT_CONTROL_MODE:
-            # Auto-brake: switch to velocity mode with goal=0 when controls released
             if all_zero:
-                if not self._braking:
-                    self._braking = True
-                    if self._drive_mode != VELOCITY_CONTROL_MODE:
-                        self._switch_mode(VELOCITY_CONTROL_MODE)
-                if self._ready:
-                    for mid in MOTOR_IDS:
-                        self._set_velocity(mid, 0)
+                if not self._torque_disabled:
+                    self._torque_disabled = True
+                    if self._ready:
+                        for mid in MOTOR_IDS:
+                            self.packet.write1ByteTxRx(
+                                self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
             else:
-                if self._braking:
-                    self._braking = False
-                    if self._drive_mode != CURRENT_CONTROL_MODE:
-                        self._switch_mode(CURRENT_CONTROL_MODE)
+                if self._torque_disabled:
+                    self._torque_disabled = False
+                    if self._ready:
+                        for mid in MOTOR_IDS:
+                            self.packet.write1ByteTxRx(
+                                self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
                 if self._ready:
                     for i, cmd in enumerate(wheel_cmds):
                         self._last_cmds[i] = cmd
@@ -266,6 +282,19 @@ class WheelController(Node):
         msg = Int32MultiArray()
         msg.data = currents
         self.currents_pub.publish(msg)
+
+    def _publish_temps(self):
+        temps = []
+        for mid in MOTOR_IDS:
+            if self._ready:
+                data, result, _ = self.packet.read1ByteTxRx(
+                    self.port, mid, ADDR_PRESENT_TEMPERATURE)
+                temps.append(int(data) if result == COMM_SUCCESS else 0)
+            else:
+                temps.append(0)
+        msg = Int32MultiArray()
+        msg.data = temps
+        self.temps_pub.publish(msg)
 
     def _disable_motors(self):
         if not self._ready:

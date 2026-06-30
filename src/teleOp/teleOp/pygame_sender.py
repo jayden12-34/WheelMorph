@@ -59,8 +59,8 @@ SD_BTN_X  = 2    # west   — snap BL leg to 0°
 SD_BTN_Y  = 3    # north  — snap FL leg to 0°
 SD_BTN_L1 = 4    # extend all legs
 SD_BTN_R1 = 5    # retract all legs
-SD_BTN_L4 = 11   # upper-left  paddle → FL wheel
-SD_BTN_L5 = 13   # lower-left  paddle → BL wheel
+SD_BTN_L4 = 11   # upper-left  paddle → BL wheel
+SD_BTN_L5 = 13   # lower-left  paddle → FL wheel
 SD_BTN_R4 = 12   # upper-right paddle → FR wheel
 SD_BTN_R5 = 14   # lower-right paddle → BR wheel
 
@@ -91,6 +91,7 @@ class TeleopSender:
         self.state = dict(
             wheel_torque=[0]*4, leg_angles=[0]*4,
             wheel_currents=[0]*4, leg_currents=[0]*4,
+            wheel_temps=[0]*4,
             speed_pct=20,
         )
         self._state_lock = threading.Lock()
@@ -634,8 +635,8 @@ class TeleopSender:
         cy = self._section_hdr('PADDLES  —  SPIN WHEEL', x, cy, w)
         cy += 4
         paddle_rows = [
-            ('L4 [V]', 'FL wheel', self.ctrl['l4']),
-            ('L5 [B]', 'BL wheel', self.ctrl['l5']),
+            ('L4 [V]', 'BL wheel', self.ctrl['l4']),
+            ('L5 [B]', 'FL wheel', self.ctrl['l5']),
             ('R4 [N]', 'FR wheel', self.ctrl['r4']),
             ('R5 [M]', 'BR wheel', self.ctrl['r5']),
         ]
@@ -660,10 +661,11 @@ class TeleopSender:
         x, y, w, h = rect.x, rect.y, rect.width, rect.height
 
         with self._state_lock:
-            wt  = list(self.state['wheel_torque'])
-            la  = list(self.state['leg_angles'])
-            wc  = list(self.state['wheel_currents'])
-            lc  = list(self.state['leg_currents'])
+            wt   = list(self.state['wheel_torque'])
+            la   = list(self.state['leg_angles'])
+            wc   = list(self.state['wheel_currents'])
+            lc   = list(self.state['leg_currents'])
+            wtmp = list(self.state['wheel_temps'])
 
         cy = y + 6
 
@@ -734,6 +736,24 @@ class TeleopSender:
         tot_col = RED if total > 5000 else (CYAN if total > 500 else WHITE)
         tot_s = self.font_med.render(tot_txt, True, tot_col)
         self.screen.blit(tot_s, (x + w // 2 - tot_s.get_width() // 2, cy))
+        cy += tot_s.get_height() + 6
+
+        # Wheel temperatures — published every 2 s from motors
+        cy = self._section_hdr('WHEEL TEMPS (°C)', x, cy, w)
+        cy += 4
+        tmp_labels = ['FL', 'FR', 'BL', 'BR']
+        tmp_vals   = [wtmp[0], wtmp[2], wtmp[1], wtmp[3]]  # reorder to FL/FR/BL/BR
+        q_t = w // 4
+        for i, (lbl, t) in enumerate(zip(tmp_labels, tmp_vals)):
+            if   t >= 70: tc = RED
+            elif t >= 60: tc = ORANGE
+            elif t >= 50: tc = YELLOW
+            else:         tc = GREEN
+            px = x + i * q_t
+            ls = self.font_sm.render(lbl, True, GRAY)
+            self.screen.blit(ls, (px + q_t // 2 - ls.get_width() // 2, cy))
+            vs = self.font_med.render(f'{t}°', True, tc)
+            self.screen.blit(vs, (px + q_t // 2 - vs.get_width() // 2, cy + 12))
 
     def _draw_camera(self, rect: pygame.Rect):
         pygame.draw.rect(self.screen, DARK, rect, border_radius=4)
