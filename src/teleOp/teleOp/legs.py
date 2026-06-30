@@ -7,7 +7,10 @@ import tty
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray, Bool
-from dynamixel_sdk import PortHandler, PacketHandler, COMM_SUCCESS
+from dynamixel_sdk import (
+    PortHandler, PacketHandler, COMM_SUCCESS,
+    GroupSyncRead, GroupSyncWrite,
+)
 
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
@@ -50,18 +53,21 @@ class LegController(Node):
         self.port   = PortHandler(PORT)
         self.packet = PacketHandler(PROTOCOL_VERSION)
 
-        self._ready       = self._initialize()
-        self._compliant   = False
-        self._leg_targets = [90] * len(MOTOR_IDS)
+        # Sync objects created once; reused every cycle to minimise serial traffic
+        self._gsr_current   = GroupSyncRead(self.port, self.packet, ADDR_PRESENT_CURRENT, 2)
+        self._gsw_position  = GroupSyncWrite(self.port, self.packet, ADDR_GOAL_POSITION, 4)
+        for mid in MOTOR_IDS:
+            self._gsr_current.addParam(mid)
 
-        self.subscription = self.create_subscription(
-            Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
-        self.estop_sub = self.create_subscription(
-            Bool, 'estop', self._estop_callback, 10)
-        self.reset_sub = self.create_subscription(
-            Bool, 'motor_reset', self._motor_reset_callback, 10)
-        self.compliant_sub = self.create_subscription(
-            Bool, 'compliant_mode', self._compliant_callback, 10)
+        self._ready          = self._initialize()
+        self._compliant      = False
+        self._leg_targets    = [90] * len(MOTOR_IDS)
+        self._last_leg_angles = None  # None forces the first position write
+
+        self.create_subscription(Int32MultiArray, 'wheel_commands', self.listener_callback, 10)
+        self.create_subscription(Bool, 'estop',          self._estop_callback,       10)
+        self.create_subscription(Bool, 'motor_reset',    self._motor_reset_callback, 10)
+        self.create_subscription(Bool, 'compliant_mode', self._compliant_callback,   10)
 
         self.currents_pub = self.create_publisher(Int32MultiArray, 'leg_currents', 10)
         self.create_timer(0.1, self._publish_currents)
@@ -117,6 +123,8 @@ class LegController(Node):
             angle_deg = 180 - angle_deg
         return angle_deg
 
+    # ── Individual helper — used for compliant-mode hold and init ─────────────
+
     def _set_position(self, motor_id, angle_deg):
         angle_deg = self._normalize_angle(motor_id, angle_deg)
         position  = int(angle_deg * TICKS_PER_DEGREE)
@@ -125,14 +133,29 @@ class LegController(Node):
         if result != COMM_SUCCESS:
             self.get_logger().warn(f'Position write failed for leg motor {motor_id}')
 
+    # ── Batch helper — one serial packet for all four motors ──────────────────
+
+    def _sync_set_positions(self, angles):
+        self._gsw_position.clearParam()
+        for i, mid in enumerate(MOTOR_IDS):
+            position = int(self._normalize_angle(mid, angles[i]) * TICKS_PER_DEGREE)
+            raw = position & 0xFFFFFFFF
+            self._gsw_position.addParam(mid, [
+                raw & 0xFF, (raw >> 8) & 0xFF,
+                (raw >> 16) & 0xFF, (raw >> 24) & 0xFF,
+            ])
+        if self._gsw_position.txPacket() != COMM_SUCCESS:
+            self.get_logger().warn('SyncWrite position failed')
+
+    # ── ROS callbacks ─────────────────────────────────────────────────────────
+
     def _estop_callback(self, msg):
         if not msg.data:
             return
         self.get_logger().warn('EMERGENCY STOP received — disabling leg motors')
         if self._ready:
             for mid in MOTOR_IDS:
-                self.packet.write1ByteTxRx(
-                    self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+                self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
             self._ready = False
         else:
             self.get_logger().warn('[SIM] Emergency stop acknowledged')
@@ -141,6 +164,7 @@ class LegController(Node):
         if not msg.data:
             return
         self.get_logger().info('Motor reset: reconnecting leg motors')
+        self._last_leg_angles = None
         all_ok = True
         for mid in MOTOR_IDS:
             self.packet.write1ByteTxRx(self.port, mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
@@ -169,8 +193,6 @@ class LegController(Node):
 
     def _compliant_callback(self, msg):
         self._compliant = msg.data
-        # Torque stays on in compliant mode — the current-monitoring timer
-        # backs off under resistance rather than going fully passive.
         self.get_logger().info(f'Leg compliant mode {"ON" if msg.data else "OFF"}')
 
     def listener_callback(self, msg):
@@ -179,58 +201,66 @@ class LegController(Node):
             return
 
         leg_angles = list(msg.data[4:8])
-
-        for i, angle in enumerate(leg_angles):
-            self._leg_targets[i] = angle
+        self._leg_targets = leg_angles
 
         if self._ready and not self._compliant:
-            for i, angle in enumerate(leg_angles):
-                self._set_position(MOTOR_IDS[i], angle)
+            if leg_angles != self._last_leg_angles:
+                self._last_leg_angles = leg_angles
+                self._sync_set_positions(leg_angles)
         elif not self._ready:
             self._sim_counter += 1
             if self._sim_counter % 20 == 0:
-                ticks = [int(self._normalize_angle(MOTOR_IDS[i], a) * TICKS_PER_DEGREE)
-                         for i, a in enumerate(leg_angles)]
+                ticks = [
+                    int(self._normalize_angle(MOTOR_IDS[i], a) * TICKS_PER_DEGREE)
+                    for i, a in enumerate(leg_angles)
+                ]
                 self.get_logger().info(
-                    f'[SIM] leg_angles={leg_angles}°  '
-                    f'→ dynamixel_positions={ticks}')
-        # In compliant mode with ready hardware, the current-monitoring timer
-        # drives toward _leg_targets and backs off under high resistance.
+                    f'[SIM] leg_angles={leg_angles}°  → dynamixel_positions={ticks}')
+        # In compliant mode with ready hardware, _publish_currents drives toward
+        # _leg_targets and backs off under high resistance.
 
     def _read_present_position(self, motor_id):
         data, result, _ = self.packet.read4ByteTxRx(
             self.port, motor_id, ADDR_PRESENT_POSITION)
         return data if result == COMM_SUCCESS else None
 
+    # ── Publisher ─────────────────────────────────────────────────────────────
+
     def _publish_currents(self):
+        msg = Int32MultiArray()
+        if not self._ready:
+            msg.data = [0] * len(MOTOR_IDS)
+            self.currents_pub.publish(msg)
+            return
+
+        result   = self._gsr_current.txRxPacket()
         currents = []
         for i, mid in enumerate(MOTOR_IDS):
-            if self._ready:
-                data, result, _ = self.packet.read2ByteTxRx(
-                    self.port, mid, ADDR_PRESENT_CURRENT)
-                if result == COMM_SUCCESS:
-                    if data > 32767:
-                        data -= 65536
-                    current_ma = int(data * CURRENT_UNIT_MA)
-                    currents.append(current_ma)
+            if result == COMM_SUCCESS and \
+                    self._gsr_current.isAvailable(mid, ADDR_PRESENT_CURRENT, 2):
+                raw = self._gsr_current.getData(mid, ADDR_PRESENT_CURRENT, 2)
+                if raw > 32767:
+                    raw -= 65536
+                current_ma = int(raw * CURRENT_UNIT_MA)
+                currents.append(current_ma)
 
-                    if self._compliant:
-                        if abs(current_ma) > COMPLIANT_CURRENT_THRESHOLD_MA:
-                            # Strong resistance — freeze at current position
-                            present = self._read_present_position(mid)
-                            if present is not None:
-                                self.packet.write4ByteTxRx(
-                                    self.port, mid, ADDR_GOAL_POSITION, present)
-                        else:
-                            # No resistance — drive toward commanded target
-                            self._set_position(mid, self._leg_targets[i])
-                else:
-                    currents.append(0)
+                if self._compliant:
+                    if abs(current_ma) > COMPLIANT_CURRENT_THRESHOLD_MA:
+                        # Strong resistance — freeze at current position
+                        present = self._read_present_position(mid)
+                        if present is not None:
+                            self.packet.write4ByteTxRx(
+                                self.port, mid, ADDR_GOAL_POSITION, present)
+                    else:
+                        # No resistance — drive toward commanded target
+                        self._set_position(mid, self._leg_targets[i])
             else:
                 currents.append(0)
-        msg = Int32MultiArray()
+
         msg.data = currents
         self.currents_pub.publish(msg)
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
 
     def _disable_motors(self):
         if not self._ready:
@@ -278,7 +308,7 @@ def main(args=None):
                 r, _, _ = select.select([sys.stdin], [], [], 0.1)
                 if r:
                     ch = sys.stdin.read(1)
-                    if ch in ('\x1b', '\x03'):  # ESC or Ctrl+C
+                    if ch in ('\x1b', '\x03'):
                         node.get_logger().warn('ESC pressed — disabling leg motors and exiting')
                         break
         except (KeyboardInterrupt, SystemExit):

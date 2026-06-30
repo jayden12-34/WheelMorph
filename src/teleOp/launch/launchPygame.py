@@ -2,7 +2,9 @@ import datetime
 import os
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, Shutdown
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 _BAG_DIR = os.path.join(
@@ -13,6 +15,11 @@ _BAG_DIR = os.path.join(
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'bag',
+            default_value='false',
+            description='Record a ROS bag (true/false)',
+        ),
         Node(
             package='teleOp',
             executable='wheels',
@@ -35,6 +42,7 @@ def generate_launch_description():
         ExecuteProcess(
             cmd=['ros2', 'bag', 'record', '-a', '-o', _BAG_DIR],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('bag')),
         ),
         ExecuteProcess(
             cmd=['teleop_sender'],

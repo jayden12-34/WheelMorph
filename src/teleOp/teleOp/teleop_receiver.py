@@ -21,11 +21,12 @@ CAM_WIDTH   = 640
 CAM_HEIGHT  = 360
 CAM_QUALITY = 60   # JPEG quality — trades file size vs latency
 
-SD_DEADZONE    = 0.12
-SD_LEG_STEP    = 30    # doubled step size
+SD_DEADZONE = 0.12
+SD_LEG_STEP = 30
 
-TRACK_CM     = 24.5   # left-right wheel spacing (mm → cm)
-WHEELBASE_CM = 33.0   # front-back wheel spacing (not used in mixing)
+
+def _clamp(v, lo, hi):
+    return int(lo if v < lo else hi if v > hi else v)
 
 
 class TeleopReceiver(Node):
@@ -126,13 +127,11 @@ class TeleopReceiver(Node):
         with self.lock:
             angles    = list(self.leg_angles)
             speed_pct = self.speed_pct
-
-        if 'drive_mode' in ctrl:
-            with self.lock:
-                self.drive_mode = max(0, min(1, int(ctrl['drive_mode'])))
+            if 'drive_mode' in ctrl:
+                self.drive_mode = _clamp(int(ctrl['drive_mode']), 0, 1)
 
         if ctrl.get('speed_pct') is not None:
-            speed_pct = max(0, min(100, int(ctrl['speed_pct'])))
+            speed_pct = _clamp(int(ctrl['speed_pct']), 0, 100)
 
         if ctrl.get('l2'):
             with self.lock:
@@ -157,15 +156,13 @@ class TeleopReceiver(Node):
         effective = speed_pct / 100.0 * self.wheel_max
         forward   = -ly * effective
         turn      =  lx * effective
-
-        def clamp(v):
-            return int(max(-self.wheel_max, min(self.wheel_max, v)))
+        wm        = self.wheel_max
 
         ws = [
-            clamp(forward + turn),  # FL
-            clamp(forward + turn),  # BL
-            clamp(forward - turn),  # FR
-            clamp(forward - turn),  # BR
+            _clamp(forward + turn, -wm, wm),  # FL
+            _clamp(forward + turn, -wm, wm),  # BL
+            _clamp(forward - turn, -wm, wm),  # FR
+            _clamp(forward - turn, -wm, wm),  # BR
         ]
 
         # dpad = retract individual legs  (left side)
@@ -228,12 +225,11 @@ class TeleopReceiver(Node):
     # ── Publish / state loops ────────────────────────────────────────────────
 
     def _publish_loop(self):
-        dt = 1.0 / 20
+        dt  = 1.0 / 20
+        msg = Int32MultiArray()
         while rclpy.ok():
-            msg = Int32MultiArray()
             with self.lock:
-                msg.data = (list(self.wheel_cmd) + list(self.leg_angles) +
-                            [self.drive_mode])
+                msg.data = list(self.wheel_cmd) + list(self.leg_angles) + [self.drive_mode]
             self.pub.publish(msg)
             time.sleep(dt)
 
@@ -243,7 +239,7 @@ class TeleopReceiver(Node):
             addr = self._sender_addr
             if addr:
                 with self.lock:
-                    payload = json.dumps({
+                    state = {
                         'type':           'state',
                         'wheel_torque':   list(self.wheel_cmd),
                         'leg_angles':     list(self.leg_angles),
@@ -252,9 +248,9 @@ class TeleopReceiver(Node):
                         'wheel_temps':    list(self.wheel_temps),
                         'speed_pct':      self.speed_pct,
                         'drive_mode':     self.drive_mode,
-                    }).encode()
+                    }
                 try:
-                    self._state_sock.sendto(payload, addr)
+                    self._state_sock.sendto(json.dumps(state).encode(), addr)
                 except Exception:
                     pass
             time.sleep(dt)
