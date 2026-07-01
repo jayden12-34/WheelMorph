@@ -86,7 +86,7 @@ class TeleopSender:
             l2=False, l1=False, r1=False,
             l4=False, l5=False, r4=False, r5=False,
             btn_a=False, btn_b=False, btn_x=False, btn_y=False,
-            dpad=[0, 0],
+            dpad=[0, 0], paddle_reverse=False,
         )
 
         self.state = dict(
@@ -142,6 +142,7 @@ class TeleopSender:
         self._reset_rect = pygame.Rect(0, 0, 0, 0)
         self._spd_track  = pygame.Rect(0, 0, 0, 0)
         self._mode_rect  = pygame.Rect(0, 0, 0, 0)
+        self._paddle_rev_rect = pygame.Rect(0, 0, 0, 0)
 
         # Motor reset flash state
         self._reset_flash = 0.0
@@ -347,6 +348,8 @@ class TeleopSender:
                     self.do_motor_reset()
                 elif ev.key == pygame.K_t:
                     self.drive_mode = 1 - self.drive_mode
+                elif ev.key == pygame.K_p:
+                    self.ctrl['paddle_reverse'] = not self.ctrl['paddle_reverse']
                 elif ev.key == pygame.K_c:
                     self._cam_view = not self._cam_view
                 elif ev.key == pygame.K_v:
@@ -376,6 +379,8 @@ class TeleopSender:
                     self.do_motor_reset()
                 elif self._mode_rect.collidepoint(p):
                     self.drive_mode = 1 - self.drive_mode
+                elif self._paddle_rev_rect.collidepoint(p):
+                    self.ctrl['paddle_reverse'] = not self.ctrl['paddle_reverse']
                 elif self._spd_track.collidepoint(p):
                     self._speed_dragging = True
                     self._set_speed_from_x(p[0])
@@ -562,6 +567,23 @@ class TeleopSender:
         self.screen.blit(md_s, (md_x + BW_MD // 2 - md_s.get_width() // 2,
                                  btn_y + BH // 2 - md_s.get_height() // 2))
         self._mode_rect = md_rect
+
+        BW_PD = self._sw(150)
+        pd_x  = md_x - BW_PD - GAP
+        pd_rect = pygame.Rect(pd_x, btn_y, BW_PD, BH)
+        reversed_ = self.ctrl['paddle_reverse']
+        if reversed_:
+            pd_bg, pd_fg, pd_col = (30, 0, 8), RED_DIM, RED
+            pd_txt = '▼ PADDLES: REV [P]'
+        else:
+            pd_bg, pd_fg, pd_col = DARK, PURPLE_DIM, PURPLE
+            pd_txt = '▲ PADDLES: FWD [P]'
+        pygame.draw.rect(self.screen, pd_bg, pd_rect, border_radius=self._ss(4))
+        pygame.draw.rect(self.screen, pd_fg, pd_rect, 1, border_radius=self._ss(4))
+        pd_s = self.font_sm.render(pd_txt, True, pd_col)
+        self.screen.blit(pd_s, (pd_x + BW_PD // 2 - pd_s.get_width() // 2,
+                                 btn_y + BH // 2 - pd_s.get_height() // 2))
+        self._paddle_rev_rect = pd_rect
 
         return y + bar_h
 

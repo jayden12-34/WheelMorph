@@ -152,6 +152,8 @@ canvas.js{border-radius:50%;touch-action:none;cursor:crosshair;}
     <span id="spd-num">20%</span>
     <button class="btn btn-p" id="btn-mode"
       style="width:100px;height:28px;font-size:10px;">⚡ TORQUE</button>
+    <button class="btn btn-p" id="btn-paddle-dir"
+      style="width:130px;height:28px;font-size:10px;">▲ PADDLES: FWD</button>
     <button class="btn btn-r" id="btn-ocharge"
       style="width:116px;height:28px;font-size:10px;font-weight:bold;">⚠ OVERCHARGE</button>
     <button class="btn btn-r" id="btn-l2"
@@ -304,7 +306,7 @@ const raw = {
   l4:false, l5:false, r4:false, r5:false,
   btn_a:false, btn_b:false, btn_x:false, btn_y:false,
   dp_up:false, dp_down:false, dp_left:false, dp_right:false,
-  overcharge:false,
+  overcharge:false, paddle_reverse:false,
 };
 
 function buildMsg() {
@@ -320,6 +322,7 @@ function buildMsg() {
       (raw.dp_up?1:0)-(raw.dp_down?1:0),
     ],
     overcharge: raw.overcharge,
+    paddle_reverse: raw.paddle_reverse,
   });
 }
 
@@ -519,6 +522,19 @@ modeBtn.addEventListener('click', ()=>setMode(driveMode?0:1));
 modeBtn.addEventListener('touchstart', e=>{e.preventDefault();setMode(driveMode?0:1);},{passive:false});
 
 // ════════════════════════════════════════════════
+// Paddle direction toggle (singular wheel control — forward ↔ reverse)
+// ════════════════════════════════════════════════
+const paddleDirBtn = document.getElementById('btn-paddle-dir');
+
+function setPaddleReverse(on) {
+  raw.paddle_reverse = on;
+  paddleDirBtn.textContent = on ? '▼ PADDLES: REV' : '▲ PADDLES: FWD';
+  paddleDirBtn.classList.toggle('pressed', on);
+}
+paddleDirBtn.addEventListener('click', ()=>setPaddleReverse(!raw.paddle_reverse));
+paddleDirBtn.addEventListener('touchstart', e=>{e.preventDefault();setPaddleReverse(!raw.paddle_reverse);},{passive:false});
+
+// ════════════════════════════════════════════════
 // Overcharge button (hold — torque mode only)
 // ════════════════════════════════════════════════
 const ochDown = e=>{
@@ -663,7 +679,7 @@ class WebTeleop(Node):
                           l2=False, l1=False, r1=False,
                           l4=False, l5=False, r4=False, r5=False,
                           btn_a=False, btn_b=False, btn_x=False, btn_y=False,
-                          dpad=[0, 0])
+                          dpad=[0, 0], paddle_reverse=False)
 
         self.create_subscription(
             Int32MultiArray, 'wheel_currents', self._wheel_cb, 10)
@@ -738,6 +754,7 @@ class WebTeleop(Node):
         if ctrl.get('btn_a'): angles[3] = max(0, angles[3] - SD_LEG_STEP)
 
         paddle_spd = max(1, int(self.wheel_max * self.speed_pct / 100))
+        if ctrl.get('paddle_reverse'): paddle_spd = -paddle_spd
         if ctrl.get('l4'): ws[0] = paddle_spd
         if ctrl.get('l5'): ws[1] = paddle_spd
         if ctrl.get('r4'): ws[2] = paddle_spd
@@ -793,7 +810,7 @@ class WebTeleop(Node):
 # ── WebSocket handlers ────────────────────────────────────────────────────────
 _CTRL_FIELDS = ('lx','ly','ry','l2','l1','r1',
                 'l4','l5','r4','r5',
-                'btn_a','btn_b','btn_x','btn_y','dpad')
+                'btn_a','btn_b','btn_x','btn_y','dpad','paddle_reverse')
 
 
 async def ws_client(node: WebTeleop, websocket):

@@ -15,7 +15,7 @@ from dynamixel_sdk import (
 PROTOCOL_VERSION = 2.0
 BAUDRATE = 1000000
 PORT = '/dev/ttyUSB0'
-MOTOR_IDS = [0, 1, 2, 3]
+MOTOR_IDS = [1, 0, 2, 3]  # FL/BL physically swapped — motor 1 = FL, motor 0 = BL
 
 ADDR_OPERATING_MODE   = 11
 ADDR_TORQUE_ENABLE    = 64

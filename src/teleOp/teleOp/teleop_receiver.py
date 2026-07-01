@@ -184,6 +184,7 @@ class TeleopReceiver(Node):
         if ctrl.get('btn_a'): angles[3] = min(180, angles[3] + SD_LEG_STEP)
 
         paddle_spd = max(1, int(self.wheel_max * speed_pct / 100))
+        if ctrl.get('paddle_reverse'): paddle_spd = -paddle_spd
         if ctrl.get('l4'): ws[1] = paddle_spd   # BL
         if ctrl.get('l5'): ws[0] = paddle_spd   # FL
         if ctrl.get('r4'): ws[2] = paddle_spd   # FR
