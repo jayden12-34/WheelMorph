@@ -8,7 +8,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 _BAG_DIR = os.path.join(
-    os.path.expanduser('~/ros_bags'),
+    '/home/box/wheel/bags',
     'teleop_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'),
 )
 

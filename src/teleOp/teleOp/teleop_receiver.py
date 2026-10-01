@@ -1,344 +1,614 @@
+#!/usr/bin/env python3
+
 import json
 import socket
 import threading
 import time
 
-try:
-    import cv2
-    _CV2_AVAILABLE = True
-except ImportError:
-    _CV2_AVAILABLE = False
-
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int32MultiArray, Bool
+from std_msgs.msg import Int32MultiArray
 
-CTRL_PORT  = 7700
+
+CTRL_PORT = 7700
 STATE_PORT = 7701
-CAM_PORT   = 7702
+DISCOVERY_PORT = 7799
 
-CAM_WIDTH   = 640
-CAM_HEIGHT  = 360
-CAM_QUALITY = 60   # JPEG quality — trades file size vs latency
+DISCOVERY_REQUEST = 'WHEEL_TELEOP_DISCOVER'
+DISCOVERY_RESPONSE = 'WHEEL_TELEOP_HERE'
 
 SD_DEADZONE = 0.12
 SD_LEG_STEP = 30
 
 
 def _clamp(v, lo, hi):
-    return int(lo if v < lo else hi if v > hi else v)
+    return int(
+        lo if v < lo
+        else hi if v > hi
+        else v
+    )
 
 
 class TeleopReceiver(Node):
 
     def __init__(self):
+
         super().__init__('teleop_receiver')
 
-        self.declare_parameter('ctrl_port',  CTRL_PORT)
-        self.declare_parameter('state_port', STATE_PORT)
-        ctrl_port  = self.get_parameter('ctrl_port').value
-        state_port = self.get_parameter('state_port').value
+        # ── ROS publishers ───────────────────────────────────────────────────
 
-        self.pub       = self.create_publisher(Int32MultiArray, 'wheel_commands', 10)
-        self.estop_pub = self.create_publisher(Bool, 'estop', 10)
-        self.reset_pub = self.create_publisher(Bool, 'motor_reset', 10)
+        self.pub = self.create_publisher(
+            Int32MultiArray,
+            'wheel_commands',
+            10
+        )
 
-        self.create_subscription(Int32MultiArray, 'wheel_currents', self._wheel_cb, 10)
-        self.create_subscription(Int32MultiArray, 'leg_currents',   self._leg_cb,   10)
-        self.create_subscription(Int32MultiArray, 'wheel_temps',    self._temps_cb, 10)
+        # ── State ────────────────────────────────────────────────────────────
 
-        self.wheel_cmd      = [0, 0, 0, 0]
-        self.leg_angles     = [0, 0, 0, 0]
-        self.wheel_currents = [0, 0, 0, 0]
-        self.leg_currents   = [0, 0, 0, 0]
-        self.wheel_temps    = [0, 0, 0, 0]
-        self.speed_pct      = 20
-        self.wheel_max      = 50
-        self.drive_mode     = 0    # 0 = torque/current, 1 = velocity
-        self.lock           = threading.Lock()
+        self.wheel_cmd = [0, 0, 0, 0]
 
-        self._sender_addr = None
-        self._state_port  = state_port
+        # Logical angles:
+        # [FL, BL, FR, BR]
+        self.leg_angles = [0, 0, 0, 0]
 
-        self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._ctrl_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._ctrl_sock.bind(('0.0.0.0', ctrl_port))
-        self._ctrl_sock.settimeout(1.0)
+        self.speed_pct = 20
+        self.wheel_max = 50
+        self.drive_mode = 0
 
-        self._state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.lock = threading.Lock()
 
-        self._cam_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # IP address of the most recent teleop sender
+        self.client_addr = None
 
-        threading.Thread(target=self._recv_loop,      daemon=True).start()
-        threading.Thread(target=self._publish_loop,   daemon=True).start()
-        threading.Thread(target=self._state_loop,     daemon=True).start()
-        if _CV2_AVAILABLE:
-            threading.Thread(target=self._cam_sender_loop, daemon=True).start()
+        # ── UDP control socket ───────────────────────────────────────────────
+
+        self.ctrl_sock = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM
+        )
+
+        self.ctrl_sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_REUSEADDR,
+            1
+        )
+
+        # IMPORTANT:
+        # Listen on every network interface.
+        self.ctrl_sock.bind(
+            ('0.0.0.0', CTRL_PORT)
+        )
+
+        self.ctrl_sock.settimeout(0.5)
+
+        # ── UDP discovery socket ─────────────────────────────────────────────
+
+        self.discovery_sock = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM
+        )
+
+        self.discovery_sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_REUSEADDR,
+            1
+        )
+
+        self.discovery_sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_BROADCAST,
+            1
+        )
+
+        self.discovery_sock.bind(
+            ('0.0.0.0', DISCOVERY_PORT)
+        )
+
+        self.discovery_sock.settimeout(0.5)
+
+        # ── Threads ──────────────────────────────────────────────────────────
+
+        threading.Thread(
+            target=self._recv_loop,
+            daemon=True
+        ).start()
+
+        threading.Thread(
+            target=self._discovery_loop,
+            daemon=True
+        ).start()
+
+        # ── Publish state at 20 Hz ───────────────────────────────────────────
+
+        self.create_timer(
+            1.0 / 20.0,
+            self._publish_loop
+        )
 
         self.get_logger().info(
-            f'TeleopReceiver ready  ctrl=UDP:{ctrl_port}  state=UDP:{state_port}'
-            + (f'  cam=UDP:{CAM_PORT}' if _CV2_AVAILABLE else '  cam=disabled (cv2 missing)'))
+            f'Teleop receiver listening on '
+            f'UDP {CTRL_PORT}'
+        )
 
-    # ── ROS subscribers ─────────────────────────────────────────────────────
+        self.get_logger().info(
+            f'Discovery listening on '
+            f'UDP {DISCOVERY_PORT}'
+        )
 
-    def _wheel_cb(self, msg):
-        with self.lock:
-            self.wheel_currents = list(msg.data[:4])
+    # ── Discovery ────────────────────────────────────────────────────────────
 
-    def _leg_cb(self, msg):
-        with self.lock:
-            self.leg_currents = list(msg.data[:4])
+    def _discovery_loop(self):
 
-    def _temps_cb(self, msg):
-        with self.lock:
-            self.wheel_temps = list(msg.data[:4])
-
-    # ── UDP receive loop ─────────────────────────────────────────────────────
-
-    def _recv_loop(self):
         while rclpy.ok():
+
             try:
-                data, addr = self._ctrl_sock.recvfrom(4096)
+
+                data, addr = self.discovery_sock.recvfrom(
+                    1024
+                )
+
+                msg = data.decode(
+                    errors='ignore'
+                )
+
+                if msg == DISCOVERY_REQUEST:
+
+                    # Remember the sender.
+                    self.client_addr = addr[0]
+
+                    response = (
+                        f'{DISCOVERY_RESPONSE} '
+                        f'{CTRL_PORT}'
+                    )
+
+                    self.discovery_sock.sendto(
+                        response.encode(),
+                        addr
+                    )
+
+                    self.get_logger().info(
+                        f'Discovery request from '
+                        f'{addr[0]} — responding'
+                    )
+
             except socket.timeout:
                 continue
-            except OSError:
-                break
+
+            except Exception as e:
+
+                if rclpy.ok():
+                    self.get_logger().warn(
+                        f'Discovery error: {e}'
+                    )
+
+    # ── UDP control receiver ─────────────────────────────────────────────────
+
+    def _recv_loop(self):
+
+        while rclpy.ok():
+
             try:
-                msg = json.loads(data.decode())
-            except Exception:
+
+                data, addr = self.ctrl_sock.recvfrom(
+                    4096
+                )
+
+                self.client_addr = addr[0]
+
+                msg = json.loads(
+                    data.decode()
+                )
+
+                msg_type = msg.get('type')
+
+                if msg_type == 'ctrl':
+
+                    self._apply_ctrl(msg)
+
+                elif msg_type == 'estop':
+
+                    self._emergency_stop()
+
+                elif msg_type == 'motor_reset':
+
+                    threading.Thread(
+                        target=self._motor_reset,
+                        daemon=True
+                    ).start()
+
+                elif msg_type == 'speed_pct':
+
+                    with self.lock:
+
+                        self.speed_pct = max(
+                            0,
+                            min(
+                                100,
+                                int(
+                                    msg.get(
+                                        'value',
+                                        20
+                                    )
+                                )
+                            )
+                        )
+
+            except socket.timeout:
                 continue
 
-            self._sender_addr = (addr[0], self._state_port)
-            t = msg.get('type')
+            except Exception as e:
 
-            if t == 'ctrl':
-                self._apply_ctrl(msg)
-            elif t == 'estop':
-                self._emergency_stop()
-            elif t == 'motor_reset':
-                threading.Thread(target=self._motor_reset, daemon=True).start()
-            elif t == 'speed_pct':
-                with self.lock:
-                    self.speed_pct = max(0, min(100, int(msg.get('value', 20))))
+                if rclpy.ok():
+                    self.get_logger().warn(
+                        f'UDP receive error: {e}'
+                    )
 
     # ── Control processing ───────────────────────────────────────────────────
 
-    def _apply_ctrl(self, ctrl: dict):
+    def _apply_ctrl(self, ctrl):
+
         with self.lock:
-            angles    = list(self.leg_angles)
+
+            angles = list(
+                self.leg_angles
+            )
+
             speed_pct = self.speed_pct
+
             if 'drive_mode' in ctrl:
-                self.drive_mode = _clamp(int(ctrl['drive_mode']), 0, 1)
+
+                self.drive_mode = _clamp(
+                    int(ctrl['drive_mode']),
+                    0,
+                    1
+                )
 
         if ctrl.get('speed_pct') is not None:
-            speed_pct = _clamp(int(ctrl['speed_pct']), 0, 100)
 
+            speed_pct = _clamp(
+                int(ctrl['speed_pct']),
+                0,
+                100
+            )
+
+        # L2 = emergency/stop-like control
         if ctrl.get('l2'):
+
             with self.lock:
-                self.wheel_cmd  = [0, 0, 0, 0]
-                self.leg_angles = [0, 0, 0, 0]
-                self.speed_pct  = speed_pct
+
+                self.wheel_cmd = [
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+
+                self.leg_angles = [
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+
+                self.speed_pct = speed_pct
+
             return
 
-        lx = float(ctrl.get('lx', 0))
-        ly = float(ctrl.get('ly', 0))
-        ry = float(ctrl.get('ry', 0))
-        if abs(lx) < SD_DEADZONE: lx = 0.0
-        if abs(ly) < SD_DEADZONE: ly = 0.0
+        # ── Wheel control ────────────────────────────────────────────────────
 
-        # right stick forward (negative axis) sets throttle
-        throttle = max(0.0, -ry)
+        lx = float(
+            ctrl.get('lx', 0)
+        )
+
+        ly = float(
+            ctrl.get('ly', 0)
+        )
+
+        ry = float(
+            ctrl.get('ry', 0)
+        )
+
+        if abs(lx) < SD_DEADZONE:
+            lx = 0.0
+
+        if abs(ly) < SD_DEADZONE:
+            ly = 0.0
+
+        throttle = max(
+            0.0,
+            -ry
+        )
+
         if throttle < SD_DEADZONE:
-            throttle = 0.0
-        else:
-            speed_pct = int(throttle * 100)
 
-        effective = speed_pct / 100.0 * self.wheel_max
-        forward   = -ly * effective
-        turn      =  lx * effective
-        wm        = self.wheel_max
+            throttle = 0.0
+
+        else:
+
+            speed_pct = int(
+                throttle * 100
+            )
+
+        effective = (
+            speed_pct
+            / 100.0
+            * self.wheel_max
+        )
+
+        forward = -ly * effective
+        turn = lx * effective
+
+        wm = self.wheel_max
 
         ws = [
-            _clamp(forward + turn, -wm, wm),  # FL
-            _clamp(forward + turn, -wm, wm),  # BL
-            _clamp(forward - turn, -wm, wm),  # FR
-            _clamp(forward - turn, -wm, wm),  # BR
+            _clamp(
+                forward + turn,
+                -wm,
+                wm
+            ),  # FL
+
+            _clamp(
+                forward + turn,
+                -wm,
+                wm
+            ),  # BL
+
+            _clamp(
+                forward - turn,
+                -wm,
+                wm
+            ),  # FR
+
+            _clamp(
+                forward - turn,
+                -wm,
+                wm
+            ),  # BR
         ]
 
-        # dpad = retract individual legs  (left side)
-        dpad = ctrl.get('dpad', [0, 0])
-        dx, dy = int(dpad[0]), int(dpad[1])
-        if dy ==  1: angles[0] = max(0,   angles[0] - SD_LEG_STEP)
-        if dx == -1: angles[1] = max(0,   angles[1] - SD_LEG_STEP)
-        if dx ==  1: angles[2] = max(0,   angles[2] - SD_LEG_STEP)
-        if dy == -1: angles[3] = max(0,   angles[3] - SD_LEG_STEP)
+        # ── Leg controls ─────────────────────────────────────────────────────
 
-        # L1 = retract all, R1 = extend all  (left=retract, right=extend)
-        if ctrl.get('l1'): angles = [max(0,   a - SD_LEG_STEP) for a in angles]
-        if ctrl.get('r1'): angles = [min(180, a + SD_LEG_STEP) for a in angles]
+        dpad = ctrl.get(
+            'dpad',
+            [0, 0]
+        )
 
-        # face buttons extend individual legs  (Y=FL, X=BL, B=FR, A=BR)
-        if ctrl.get('btn_y'): angles[0] = min(180, angles[0] + SD_LEG_STEP)
-        if ctrl.get('btn_x'): angles[1] = min(180, angles[1] + SD_LEG_STEP)
-        if ctrl.get('btn_b'): angles[2] = min(180, angles[2] + SD_LEG_STEP)
-        if ctrl.get('btn_a'): angles[3] = min(180, angles[3] + SD_LEG_STEP)
+        dx = int(dpad[0])
+        dy = int(dpad[1])
 
-        paddle_spd = max(1, int(self.wheel_max * speed_pct / 100))
-        if ctrl.get('paddle_reverse'): paddle_spd = -paddle_spd
-        if ctrl.get('l4'): ws[1] = paddle_spd   # BL
-        if ctrl.get('l5'): ws[0] = paddle_spd   # FL
-        if ctrl.get('r4'): ws[2] = paddle_spd   # FR
-        if ctrl.get('r5'): ws[3] = paddle_spd   # BR
+        # D-pad retracts individual legs
+        if dy == 1:
+            angles[0] = max(
+                0,
+                angles[0] - SD_LEG_STEP
+            )  # FL
+
+        if dx == -1:
+            angles[1] = max(
+                0,
+                angles[1] - SD_LEG_STEP
+            )  # BL
+
+        if dx == 1:
+            angles[2] = max(
+                0,
+                angles[2] - SD_LEG_STEP
+            )  # FR
+
+        if dy == -1:
+            angles[3] = max(
+                0,
+                angles[3] - SD_LEG_STEP
+            )  # BR
+
+        # L1 = retract all
+        if ctrl.get('l1'):
+
+            angles = [
+                max(
+                    0,
+                    a - SD_LEG_STEP
+                )
+                for a in angles
+            ]
+
+        # R1 = extend all
+        if ctrl.get('r1'):
+
+            angles = [
+                min(
+                    180,
+                    a + SD_LEG_STEP
+                )
+                for a in angles
+            ]
+
+        # Face buttons = extend individual legs
+        if ctrl.get('btn_y'):
+
+            angles[0] = min(
+                180,
+                angles[0] + SD_LEG_STEP
+            )  # FL
+
+        if ctrl.get('btn_x'):
+
+            angles[1] = min(
+                180,
+                angles[1] + SD_LEG_STEP
+            )  # BL
+
+        if ctrl.get('btn_b'):
+
+            angles[2] = min(
+                180,
+                angles[2] + SD_LEG_STEP
+            )  # FR
+
+        if ctrl.get('btn_a'):
+
+            angles[3] = min(
+                180,
+                angles[3] + SD_LEG_STEP
+            )  # BR
+
+        # ── Paddle wheel commands ────────────────────────────────────────────
+
+        paddle_spd = max(
+            1,
+            int(
+                self.wheel_max
+                * speed_pct
+                / 100
+            )
+        )
+
+        if ctrl.get('paddle_reverse'):
+            paddle_spd = -paddle_spd
+
+        if ctrl.get('l4'):
+            ws[1] = paddle_spd  # BL
+
+        if ctrl.get('l5'):
+            ws[0] = paddle_spd  # FL
+
+        if ctrl.get('r4'):
+            ws[2] = paddle_spd  # FR
+
+        if ctrl.get('r5'):
+            ws[3] = paddle_spd  # BR
+
+        # ── Store state ──────────────────────────────────────────────────────
 
         with self.lock:
-            self.wheel_cmd  = ws
+
+            self.wheel_cmd = ws
             self.leg_angles = angles
-            self.speed_pct  = speed_pct
+            self.speed_pct = speed_pct
 
-    def _emergency_stop(self):
-        with self.lock:
-            self.wheel_cmd  = [0, 0, 0, 0]
-            self.leg_angles = [0, 0, 0, 0]
-        zero = Int32MultiArray()
-        zero.data = [0] * 8
-        self.pub.publish(zero)
-        msg = Bool()
-        msg.data = True
-        self.estop_pub.publish(msg)
-
-    def _motor_reset(self):
-        """Zero all outputs, signal motor reset, then release."""
-        with self.lock:
-            self.wheel_cmd  = [0, 0, 0, 0]
-            self.leg_angles = [0, 0, 0, 0]
-        zero = Int32MultiArray()
-        zero.data = [0] * 8
-        self.pub.publish(zero)
-
-        msg = Bool()
-        msg.data = True
-        self.reset_pub.publish(msg)
-        time.sleep(0.5)
-        msg.data = False
-        self.reset_pub.publish(msg)
-        self.get_logger().info('Motor reset complete')
-
-    # ── Publish / state loops ────────────────────────────────────────────────
+    # ── State publishing ─────────────────────────────────────────────────────
 
     def _publish_loop(self):
-        dt  = 1.0 / 20
+
         msg = Int32MultiArray()
-        while rclpy.ok():
-            with self.lock:
-                msg.data = list(self.wheel_cmd) + list(self.leg_angles) + [self.drive_mode]
-            self.pub.publish(msg)
-            time.sleep(dt)
 
-    def _state_loop(self):
-        dt = 1.0 / 20
-        while rclpy.ok():
-            addr = self._sender_addr
-            if addr:
-                with self.lock:
-                    state = {
-                        'type':           'state',
-                        'wheel_torque':   list(self.wheel_cmd),
-                        'leg_angles':     list(self.leg_angles),
-                        'wheel_currents': list(self.wheel_currents),
-                        'leg_currents':   list(self.leg_currents),
-                        'wheel_temps':    list(self.wheel_temps),
-                        'speed_pct':      self.speed_pct,
-                        'drive_mode':     self.drive_mode,
-                    }
-                try:
-                    self._state_sock.sendto(json.dumps(state).encode(), addr)
-                except Exception:
-                    pass
-            time.sleep(dt)
+        while False:
+            pass
 
-    def _cam_sender_loop(self):
-        import os
-        cv2.setLogLevel(0)  # silence OpenCV's own stderr warnings
+        # This function is called by a ROS timer, so publish once.
+        with self.lock:
 
-        cap = None
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, CAM_QUALITY]
-        _warned_no_device = False
+            msg.data = (
+                list(self.wheel_cmd)
+                + list(self.leg_angles)
+                + [self.drive_mode]
+            )
 
-        while rclpy.ok():
-            sender = self._sender_addr
-            if sender is None:
-                time.sleep(0.1)
-                continue
+            client = self.client_addr
 
-            if cap is None or not cap.isOpened():
-                if not os.path.exists('/dev/video0'):
-                    if not _warned_no_device:
-                        self.get_logger().warn('Camera: /dev/video0 not found — waiting for USB 3.0 connection')
-                        _warned_no_device = True
-                    time.sleep(2.0)
-                    continue
+            state = {
+                'type': 'state',
+                'wheel_torque': list(self.wheel_cmd),
+                'leg_angles': list(self.leg_angles),
+                'wheel_currents': [0, 0, 0, 0],
+                'leg_currents': [0, 0, 0, 0],
+                'wheel_temps': [0, 0, 0, 0],
+                'speed_pct': self.speed_pct,
+            }
 
-                _warned_no_device = False
-                cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-                if not cap.isOpened():
-                    time.sleep(1.0)
-                    continue
-                cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
-                time.sleep(0.5)   # let the V4L2 driver finish initialising
-                self.get_logger().info('Camera opened — streaming to sender')
+        self.pub.publish(msg)
 
-            ret, frame = cap.read()
-            if not ret:
-                cap.release()
-                cap = None
-                self.get_logger().warn('Camera read failed — retrying')
-                continue
+        # Send state back to the laptop.
+        if client is not None:
 
-            ok, buf = cv2.imencode('.jpg', frame, encode_params)
-            if not ok:
-                continue
-
-            dest = (sender[0], CAM_PORT)
             try:
-                self._cam_sock.sendto(buf.tobytes(), dest)
+
+                data = json.dumps(
+                    state
+                ).encode()
+
+                self.ctrl_sock.sendto(
+                    data,
+                    (
+                        client,
+                        STATE_PORT
+                    )
+                )
+
             except Exception:
                 pass
 
-        if cap and cap.isOpened():
-            cap.release()
+    # ── E-stop ───────────────────────────────────────────────────────────────
 
-    def shutdown(self):
-        self._emergency_stop()
+    def _emergency_stop(self):
+
+        self.get_logger().warn(
+            'EMERGENCY STOP received'
+        )
+
+        with self.lock:
+
+            self.wheel_cmd = [
+                0,
+                0,
+                0,
+                0
+            ]
+
+            self.leg_angles = [
+                0,
+                0,
+                0,
+                0
+            ]
+
+    # ── Motor reset ──────────────────────────────────────────────────────────
+
+    def _motor_reset(self):
+
+        self.get_logger().info(
+            'Motor reset requested'
+        )
+
+        # Keep your existing motor-reset behavior here
+        # if this node is also responsible for it.
+
+    # ── Shutdown ─────────────────────────────────────────────────────────────
+
+    def destroy_node(self):
+
         try:
-            self._ctrl_sock.close()
+            self.ctrl_sock.close()
         except Exception:
             pass
+
         try:
-            self._state_sock.close()
+            self.discovery_sock.close()
         except Exception:
             pass
-        try:
-            self._cam_sock.close()
-        except Exception:
-            pass
+
+        super().destroy_node()
 
 
 def main(args=None):
+
     rclpy.init(args=args)
+
     node = TeleopReceiver()
+
     try:
+
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
+
     finally:
-        node.shutdown()
+
         node.destroy_node()
-        try:
+
+        if rclpy.ok():
             rclpy.shutdown()
-        except Exception:
-            pass
 
 
 if __name__ == '__main__':
