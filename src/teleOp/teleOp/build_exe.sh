@@ -4,7 +4,14 @@
 #
 # After it finishes, add the resulting file to Steam:
 #   Steam → Games → Add a Non-Steam Game → Browse → select teleop_sender
-#   In Properties → Launch Options: --host 192.168.1.XXX
+#
+# Normal use:
+#   No Launch Options needed.
+#   The sender automatically discovers the robot receiver on the local network.
+#
+# Manual override, if discovery does not work:
+#   Steam → Properties → Launch Options:
+#       --host 192.168.1.XXX
 
 set -e
 
@@ -25,6 +32,7 @@ fi
 # Use a venv to avoid "externally managed environment" errors (PEP 668)
 echo "Creating build environment..."
 "$PYTHON" -m venv "$VENV"
+
 PYTHON="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
@@ -48,3 +56,10 @@ rm -rf "$SCRIPT_DIR/.pyibuild" "$VENV"
 echo ""
 echo "Done! Add this to Steam as a Non-Steam Game:"
 echo "  $OUT_DIR/teleop_sender"
+echo ""
+echo "Normal use:"
+echo "  No Launch Options required."
+echo "  The sender will automatically discover the robot."
+echo ""
+echo "Manual override:"
+echo "  --host 192.168.1.XXX"
